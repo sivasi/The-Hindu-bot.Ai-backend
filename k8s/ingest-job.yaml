@@ -1,0 +1,33 @@
+# Optional one-shot Job: populate Chroma after first deploy.
+# Requires Vertex AI access via the same Workload Identity SA as rag-api.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rag-ingest
+  labels:
+    app: rag-ingest
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: rag-ingest
+    spec:
+      restartPolicy: Never
+      serviceAccountName: rag-api
+      containers:
+        - name: ingest
+          image: asia-south1-docker.pkg.dev/project-b23f08c8-479d-4cce-994/rag/rag-api:latest
+          imagePullPolicy: Always
+          command: ["node", "ingest.js"]
+          envFrom:
+            - configMapRef:
+                name: rag-api-config
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi

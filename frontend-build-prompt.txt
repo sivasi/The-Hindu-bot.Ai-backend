@@ -1,0 +1,254 @@
+Build a standalone frontend for a newspaper RAG Q&A app.
+
+The Express backend already exists. Do NOT rebuild ingest, Chroma, embeddings, or the API server. Only call the endpoints below.
+
+═══════════════════════════════════════
+PRODUCT (v1 — ONE SCREEN ONLY)
+═══════════════════════════════════════
+- Single Ask page only.
+- No chat-history screen, no corpus/status screen, no admin/ingest UI, no filters UI.
+- Flow: user asks a question → live RAG journey status → final answer → sources under the answer.
+- Brand / product name must be hero-level (not tiny nav text). Suggested name: “The Hindu Archive Q&A”.
+
+═══════════════════════════════════════
+BACKEND (already running)
+═══════════════════════════════════════
+Base URL: http://localhost:3001
+Env: VITE_API_URL=http://localhost:3001
+CORS is open. No auth.
+
+───────────────────────────────────────
+1) GET /api/health
+───────────────────────────────────────
+Quiet check on load. Optional small banner if ok=false. Do NOT build a status dashboard.
+
+Success example:
+{
+  "ok": true,
+  "chromaOk": true,
+  "indexReady": true,
+  "vectorCount": 4645,
+  "collection": "manual4_pdf"
+}
+
+───────────────────────────────────────
+1b) GET /api/manual  — view the newspaper PDF
+───────────────────────────────────────
+Returns application/pdf (inline) for the archived manual.
+Use in an iframe, <object>, or PDF.js:
+
+  const pdfUrl = `${import.meta.env.VITE_API_URL}/api/manual`;
+  // e.g. <iframe src={pdfUrl} title="Manual PDF" />
+  // or open page: `${pdfUrl}#page=220` when a source has pageNumber
+
+Optional metadata:
+  GET /api/manual/info
+  → { "url": "/api/manual", "filename": "manual4.pdf", "sizeBytes": 86204599, "totalPages": 264 }
+
+Do NOT download the whole PDF into JS memory unless using PDF.js; prefer iframe/object for simple viewing.
+File is large (~86MB) — rely on browser / Range streaming.
+
+───────────────────────────────────────
+2) POST /api/query/stream  ★ PRIMARY — use this for Ask
+───────────────────────────────────────
+Headers: Content-Type: application/json
+
+Normal mode body:
+{
+  "question": "how much growth of employment in power sector?",
+  "mode": "normal"
+}
+
+Turbo short mode (deep retrieval, very brief answer):
+{
+  "question": "how much growth of employment in power sector?",
+  "mode": "turbo_short"
+}
+
+Turbo research mode (deep retrieval, research answer):
+{
+  "question": "how much growth of employment in power sector?",
+  "mode": "turbo_research"
+}
+
+Mode behavior:
+| mode            | retriever k | answer length                          |
+|-----------------|-------------|----------------------------------------|
+| normal          | 3           | short/concise                          |
+| turbo_short     | 10 (fixed)  | about 30–50 words                      |
+| turbo_research  | 10 (fixed)  | research synthesis, up to 300 words max |
+
+Both turbo modes ALWAYS use k=10 (frontend cannot override k in turbo).
+turbo_research prompt: research across retrieved sources + answer ≤ 300 words.
+turbo_research ALSO streams LLM tokens over SSE so the UI can render the answer live.
+
+meta on result includes: mode, turbo (bool), streamAnswer (bool), wordTarget, k
+
+Token streaming (turbo_research only), after status events:
+  { "type": "token", "text": "partial " }
+  { "type": "token", "text": "answer " }
+  …
+Then final:
+  { "type": "result", "answer": "full answer…", "sources": [...], "meta": { "streamAnswer": true, ... } }
+  { "type": "done" }
+
+normal / turbo_short: NO token events — wait for result as before.
+
+Frontend for turbo_research:
+- Keep showing journey status until the first token (or status step "answering")
+- On each token: append event.text to the visible answer
+- On result: set answer to event.answer (authoritative full text) and render sources
+- On done: stop
+
+Frontend UI: a mode control with three options — Normal / Turbo Short / Turbo Research.
+Send the matching mode string. Do NOT rely on detecting “more detail” in the question text.
+
+Compat (optional): turbo: true → turbo_research; turbo: "short" → turbo_short.
+Prefer the mode field.
+Response: text/event-stream (SSE over fetch POST).
+Each event is one block:
+  data: {JSON}\n\n
+Comment heartbeats may appear as:
+  : ping\n\n
+Ignore ping lines.
+
+IMPORTANT: Pipeline journey status events always stream.
+LLM answer tokens stream ONLY when mode is "turbo_research"
+({ "type": "token", "text": "..." }). Do not expect tokens for normal/turbo_short.
+
+Event sequence (happy path):
+1. { "type": "status", "step": "searching", "message": "..." }
+2. { "type": "status", "step": "found", "message": "Found the content", "count": 3 }
+3. { "type": "status", "step": "llm", "message": "..." }
+4. (turbo_research only) { "type": "status", "step": "answering", "message": "Streaming the research answer" }
+5. (turbo_research only) many { "type": "token", "text": "..." }
+6. { "type": "result", "answer": "…", "sources": [...], "meta": { ... } }
+7. { "type": "done" }
+
+Failure sequence:
+{ "type": "error", "message": "…" }
+{ "type": "done" }
+
+How to consume (fetch streaming — NOT EventSource, because this is POST + JSON body):
+
+async function askStream(question, { mode = "normal", onStatus, onToken, onResult, onError } = {}) {
+  const res = await fetch(`${import.meta.env.VITE_API_URL}/api/query/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, mode }),
+  });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+
+    for (const part of parts) {
+      const line = part.trim();
+      if (!line || line.startsWith(":")) continue; // heartbeat
+      if (!line.startsWith("data:")) continue;
+      const event = JSON.parse(line.replace(/^data:\s*/, ""));
+
+      if (event.type === "status") onStatus?.(event);
+      else if (event.type === "token") onToken?.(event.text || "");
+      else if (event.type === "result") onResult?.(event);
+      else if (event.type === "error") onError?.(event.message || "Query failed");
+      else if (event.type === "done") return;
+    }
+  }
+}
+
+UX while streaming:
+- type=status → show ONLY event.message (replace previous journey line)
+- type=token (turbo_research only) → append text to the answer area live
+- type=result → set final answer + sources (replace streamed draft with event.answer)
+- type=error → show error message
+- type=done → stop; re-enable Ask
+- For normal / turbo_short: no tokens; wait for result
+
+───────────────────────────────────────
+3) POST /api/query  (fallback only)
+───────────────────────────────────────
+Same body fields (question, mode, optional k) and same final JSON shape as the
+`result` event, but blocking (no journey statuses). Prefer /api/query/stream.
+
+═══════════════════════════════════════
+UI LAYOUT (ONE COMPOSITION)
+═══════════════════════════════════════
+One page that reads as one composition, not a dashboard:
+
+1) Hero / ask
+   - Brand name (hero signal)
+   - One short supporting sentence
+   - Question input + Ask button
+   - Mode control: Normal | Turbo Short | Turbo Research (sends mode string)
+   - Optional: 2–3 suggested question chips that fill the input
+
+2) Journey status (only while waiting)
+   - Single live line with the current status.message
+
+3) Answer
+   - Clear prose answer after result arrives
+   - turbo_short → ~30–50 words (wait for full result)
+   - turbo_research → up to ~300 words, streamed token-by-token
+
+4) Sources (below answer)
+   - List (not card grid spam)
+   - Each item: heading, chunk i/n, pageNumber, section (if any), excerpt
+   - Expand/collapse to show full pageContent
+   - Turbo modes usually return more sources (up to 10)═══════════════════════════════════════
+DESIGN RULES (IMPORTANT)
+═══════════════════════════════════════
+- Print / newspaper-inspired. Expressive serif for brand/headlines; readable body text.
+- Avoid Inter / Roboto / Arial / system-only stacks as the only fonts.
+- Atmosphere: soft paper texture or subtle gradient — not a flat void.
+- One job per section: Ask → Journey → Answer → Sources.
+- Default: no cards. Especially no cards in the hero.
+- No purple-on-white / purple-indigo AI look.
+- No warm-cream + terracotta cliché.
+- No dense broadsheet hairline-column overload.
+- Avoid dark-mode-by-default, glow effects, rounded-full pill clusters, multi-layer shadows, emojis.
+- Hero budget: brand + one supporting line + ask CTA only. No stats strips / promo chips in the first viewport.
+- Desktop and mobile.
+- 2–3 subtle motions max (journey fade, answer fade-in, sources stagger). No noisy animation.
+
+═══════════════════════════════════════
+TECH
+═══════════════════════════════════════
+- Separate app/repo from the backend.
+- Preferred: Vite + React (TypeScript optional).
+- Use VITE_API_URL for all requests.
+- Keep it simple: one page is enough.
+
+═══════════════════════════════════════
+OUT OF SCOPE
+═══════════════════════════════════════
+- Multi-turn chat history screen
+- Corpus / ingest progress screen
+- PDF upload or re-ingest
+- Filters (page/section)
+- LLM token streaming UI except for turbo_research (required there)
+- Mock backend
+
+═══════════════════════════════════════
+ACCEPTANCE CHECKLIST
+═══════════════════════════════════════
+[ ] Brand + ask input clear on first viewport
+[ ] Ask uses POST /api/query/stream
+[ ] Mode control sends mode: "normal" | "turbo_short" | "turbo_research"
+[ ] turbo_short → ~30–50 word answers; turbo_research → up to ~300 words (k=10)
+[ ] turbo_research streams tokens (type=token); normal/turbo_short do not
+[ ] Turbo modes use deeper retrieval (backend handles k/prompt)
+[ ] Journey messages appear in order: searching → found → llm
+[ ] Answer + sources render on type=result (and live draft during research tokens)
+[ ] Sources show heading, chunk i/n, page, excerpt; full text expandable
+[ ] Error + empty states work
+[ ] Mobile usable
+[ ] No second/third screens (no history, no corpus status)

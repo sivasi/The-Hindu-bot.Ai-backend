@@ -1,0 +1,15 @@
+node_modules
+chroma_data
+.git
+.gitignore
+.env
+*.md
+frontend-build-prompt.txt
+api-key-request.json
+k8s
+**/gcp-sa.json
+**/*credentials*.json
+**/*-key.json
+.dockerignore
+Dockerfile
+docker-compose.yml

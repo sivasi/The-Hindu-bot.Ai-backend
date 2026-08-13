@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chroma
+  labels:
+    app: chroma
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chroma
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: chroma
+    spec:
+      containers:
+        - name: chroma
+          image: chromadb/chroma:0.6.3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: ANONYMIZED_TELEMETRY
+              value: "FALSE"
+            - name: IS_PERSISTENT
+              value: "TRUE"
+            - name: PERSIST_DIRECTORY
+              value: /chroma/chroma
+          volumeMounts:
+            - name: chroma-data
+              mountPath: /chroma/chroma
+          readinessProbe:
+            httpGet:
+              path: /api/v1/heartbeat
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/heartbeat
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: chroma-data
+          persistentVolumeClaim:
+            claimName: chroma-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chroma
+  labels:
+    app: chroma
+spec:
+  type: ClusterIP
+  selector:
+    app: chroma
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
