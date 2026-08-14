@@ -31,6 +31,8 @@ import {
   renameSession,
   deleteSession,
   appendTurn,
+  getPriorUserQuestions,
+  getPriorTurns,
 } from "./services/chats.js";
 import { requireUserId, resolveUserId } from "./middleware/user.js";
 
@@ -301,14 +303,43 @@ app.get("/api/manual", requireAuth, (req, res) => {
   });
 });
 
+/** Load prior chat turns for combined retrieval + chat-agent prompt. */
+async function loadChatContinuity(sessionId, userId) {
+  if (!sessionId || !userId) {
+    return { previousQuestions: [], priorTurns: [] };
+  }
+  try {
+    const [previousQuestions, priorTurns] = await Promise.all([
+      getPriorUserQuestions(sessionId, userId, { limit: 8 }),
+      getPriorTurns(sessionId, userId, { limit: 12 }),
+    ]);
+    return { previousQuestions, priorTurns };
+  } catch (err) {
+    console.warn("[chat continuity]", err?.message || err);
+    return { previousQuestions: [], priorTurns: [] };
+  }
+}
+
 app.post("/api/query", requireAuth, async (req, res) => {
   try {
     const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
-    const result = await askQuestion({ question, k, mode, turbo });
+    const userId = resolveUserId(req);
+    const { previousQuestions, priorTurns } = await loadChatContinuity(
+      sessionId,
+      userId
+    );
+
+    const result = await askQuestion({
+      question,
+      k,
+      mode,
+      turbo,
+      previousQuestions,
+      priorTurns,
+    });
 
     let chat = null;
     const shouldSave = saveHistory !== false;
-    const userId = resolveUserId(req);
     if (shouldSave && userId && question) {
       try {
         chat = await appendTurn({
@@ -341,10 +372,15 @@ app.post("/api/query", requireAuth, async (req, res) => {
 /**
  * SSE: pipeline journey events always.
  * LLM token stream only for mode=turbo_research ({ type: "token", text }).
- * Pass sessionId to append this turn into an existing chat box; omit to create a new session.
+ * Pass sessionId to continue a chat box (prior questions combined for embedding + agent prompt).
  */
 app.post("/api/query/stream", requireAuth, async (req, res) => {
   const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
+  const userId = resolveUserId(req);
+  const { previousQuestions, priorTurns } = await loadChatContinuity(
+    sessionId,
+    userId
+  );
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -379,6 +415,8 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
       k,
       mode,
       turbo,
+      previousQuestions,
+      priorTurns,
       onEvent: async (event) => {
         if (event?.type === "result") {
           finalResult = event;
@@ -387,7 +425,6 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
         }
         if (event?.type === "done") {
           const shouldSave = saveHistory !== false;
-          const userId = resolveUserId(req);
           if (shouldSave && userId && question && finalResult?.answer != null) {
             try {
               const chat = await appendTurn({

@@ -105,6 +105,29 @@ export async function getSessionWithMessages(sessionId, userId) {
   };
 }
 
+/** Prior user questions in a session (oldest → newest), for combined retrieval query. */
+export async function getPriorUserQuestions(sessionId, userId, { limit = 8 } = {}) {
+  const { messages } = await getSessionWithMessages(sessionId, userId);
+  const questions = messages
+    .filter((m) => m.role === "user" && m.content?.trim())
+    .map((m) => m.content.trim());
+  if (questions.length <= limit) return questions;
+  return questions.slice(-limit);
+}
+
+/** Recent turns (user+assistant) for chat-agent prompt grounding. */
+export async function getPriorTurns(sessionId, userId, { limit = 12 } = {}) {
+  const { messages } = await getSessionWithMessages(sessionId, userId);
+  const turns = messages
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content?.trim())
+    .map((m) => ({
+      role: m.role,
+      content: String(m.content).trim().slice(0, 800),
+    }));
+  if (turns.length <= limit) return turns;
+  return turns.slice(-limit);
+}
+
 export async function renameSession(sessionId, userId, title) {
   const trimmed = String(title || "").trim();
   if (!trimmed) {

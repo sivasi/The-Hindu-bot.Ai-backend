@@ -122,8 +122,17 @@ Body:
   "sessionId": "<optional — omit or null for first message in a New chat>"
 }
 
+Chat continuity (same sessionId):
+- Backend loads prior user questions in that session, COMBINES them with the current question,
+  and embeds that combined text for vector retrieval.
+- Backend also passes prior turns into the LLM as a chat-agent conversation prompt.
+- New chat (no sessionId) = no prior context.
+
 SSE event order:
   status… → (token…) → result → session → done
+
+meta on result may include:
+  chatAgent: true, priorQuestionCount, retrievalQueryPreview
 
 On type=session:
   { "type":"session", "sessionId":"...", "session":{...}, "created": true|false }

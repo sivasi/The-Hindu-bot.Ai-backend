@@ -24,39 +24,42 @@ export const MODES = {
   TURBO_RESEARCH: "turbo_research",
 };
 
-const NORMAL_SYSTEM_PROMPT = `Answer ONLY using the provided context.
-Be concise and direct. Prefer a short, clear answer.
-If the context is insufficient, say what is missing.
+const CHAT_AGENT_PREAMBLE = `You are a helpful chat agent for a newspaper archive Q&A assistant.
+Continue the conversation naturally like ChatGPT/Gemini: resolve follow-ups, pronouns, and references using the prior user questions when present.
+Answer ONLY using the provided retrieved context below. Do not invent facts outside that context.
+If the context is insufficient, say what is missing clearly.`;
 
-Context:
+const NORMAL_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
+
+Be concise and direct. Prefer a short, clear answer.
+
+Retrieved context:
 
 {context}`;
 
-const TURBO_SHORT_SYSTEM_PROMPT = `Answer ONLY using the provided context. Do not invent facts.
+const TURBO_SHORT_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
 
 Write a very short turbo answer of about 30–50 words (hard upper bound ~50 words):
 - One or two tight sentences only.
 - Lead with the direct answer; include only the most essential fact(s).
 - No preamble, no bullet lists, no closing summary.
-- If the context is insufficient, say so briefly.
 
-Context:
+Retrieved context:
 
 {context}`;
 
-const TURBO_RESEARCH_SYSTEM_PROMPT = `You are a research assistant answering from archived newspaper context only.
-Answer ONLY using the provided context. Do not invent facts outside it.
+const TURBO_RESEARCH_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
 
-Do research across the provided sources and write a research-style answer of up to 300 words maximum (never exceed 300 words; do not pad with filler):
-- Open with a clear direct answer to the question.
+You are also a research-style chat agent. Write a research-style answer of up to 300 words maximum (never exceed 300 words; do not pad with filler):
+- Open with a clear direct answer to the current user message.
+- Use prior conversation only to interpret what the user means (topics, entities, follow-ups).
 - Synthesize evidence from multiple retrieved chunks/articles when available.
 - Include supporting detail, figures, names, dates, and short quotes from the context.
 - Connect related points; note nuances or caveats if the context shows them.
 - Close with a brief synthesis of what the sources collectively show.
-- If something is not in the context, say it is not covered rather than guessing.
 Use well-structured paragraphs. Stay within 300 words.
 
-Context:
+Retrieved context:
 
 {context}`;
 
@@ -140,6 +143,47 @@ export function parseStoredChunk(doc) {
     pageContent,
     metadata: meta,
   };
+}
+
+/**
+ * Combine prior user questions + current question into one string.
+ * This combined text is embedded for vector retrieval.
+ */
+export function buildCombinedRetrievalQuery(previousQuestions, currentQuestion) {
+  const current = String(currentQuestion || "").trim();
+  const prev = (previousQuestions || [])
+    .map((q) => String(q || "").trim())
+    .filter(Boolean);
+  if (!prev.length) return current;
+  // Join as continuous sentences so the embedding captures full conversational intent.
+  return [...prev, current].join(" ");
+}
+
+/**
+ * Human message for the chat agent: prior turns + current question.
+ */
+export function buildChatAgentInput(priorTurns, currentQuestion) {
+  const current = String(currentQuestion || "").trim();
+  const turns = (priorTurns || []).filter(
+    (t) => t?.content && (t.role === "user" || t.role === "assistant")
+  );
+  if (!turns.length) return current;
+
+  const history = turns
+    .map((t) =>
+      t.role === "user"
+        ? `User: ${t.content}`
+        : `Assistant: ${t.content}`
+    )
+    .join("\n");
+
+  return `Conversation so far:
+${history}
+
+Current user message:
+${current}
+
+Respond as the chat agent to the current user message. Use the conversation for follow-up meaning; use retrieved context for facts.`;
 }
 
 async function ensureReady() {
@@ -249,6 +293,10 @@ function resolveRequest({ question, k, mode, turbo }) {
  *   { type: "token", text: "..." }
  * then a final { type: "result", answer, sources, meta }.
  *
+ * Chat continuity (same sessionId):
+ *   - previousQuestions → combined with current question → embedded for retrieval
+ *   - priorTurns → included in the chat-agent human prompt
+ *
  * mode:
  *   - "normal"         → k=3, concise (no token stream)
  *   - "turbo_short"    → k=10, ~30–50 words (no token stream)
@@ -259,6 +307,8 @@ export async function askQuestion({
   k,
   mode,
   turbo,
+  previousQuestions = [],
+  priorTurns = [],
   onEvent,
 } = {}) {
   const emit = async (event) => {
@@ -272,16 +322,22 @@ export async function askQuestion({
     turbo,
   });
 
+  const retrievalQuery = buildCombinedRetrievalQuery(previousQuestions, q);
+  const agentInput = buildChatAgentInput(priorTurns, q);
+
   await emit({
     type: "status",
     step: "searching",
-    message: cfg.searchMessage,
+    message: previousQuestions?.length
+      ? "Searching with prior chat questions + current question"
+      : cfg.searchMessage,
   });
 
   await ensureReady();
 
+  // Embed the combined prior+current questions for similarity search.
   const retriever = vectorStore.asRetriever({ k: topK });
-  const retrievedDocs = await retriever.invoke(q);
+  const retrievedDocs = await retriever.invoke(retrievalQuery);
   const sources = retrievedDocs.map(parseStoredChunk);
 
   await emit({
@@ -314,7 +370,7 @@ export async function askQuestion({
     });
 
     const stream = await combineDocsChain.stream({
-      input: q,
+      input: agentInput,
       context: retrievedDocs,
     });
 
@@ -334,7 +390,7 @@ export async function askQuestion({
   } else {
     // normal + turbo_short: blocking invoke only (no token stream)
     const raw = await combineDocsChain.invoke({
-      input: q,
+      input: agentInput,
       context: retrievedDocs,
     });
     answer = typeof raw === "string" ? raw : String(raw ?? "");
@@ -351,6 +407,9 @@ export async function askQuestion({
       wordTarget: cfg.wordTarget,
       model: getChatModel(),
       collection: CHROMA_COLLECTION,
+      chatAgent: true,
+      priorQuestionCount: (previousQuestions || []).length,
+      retrievalQueryPreview: retrievalQuery.slice(0, 240),
     },
   };
 
