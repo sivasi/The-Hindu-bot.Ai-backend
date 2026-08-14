@@ -6,7 +6,7 @@ metadata:
     app: rag-api
 data:
   PORT: "3001"
-  CORS_ORIGIN: "https://the-hindu-bot.netlify.app"
+  CORS_ORIGIN: "http://localhost:5173,https://the-hindu-bot.netlify.app"
   RETRIEVER_K: "3"
   TURBO_RETRIEVER_K: "10"
   CHROMA_URL: "http://chroma.default.svc.cluster.local:8000"
