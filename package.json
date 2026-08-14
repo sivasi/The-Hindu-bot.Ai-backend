@@ -27,7 +27,10 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "google-auth-library": "^11.0.2",
+    "jsonwebtoken": "^9.0.3",
     "langchain": "^1.5.4",
+    "mongoose": "^9.9.2",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.4.296"
   }

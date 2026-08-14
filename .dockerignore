@@ -1,5 +1,6 @@
-node_modules
+mongo_data
 chroma_data
+node_modules
 .git
 .gitignore
 .env
@@ -10,6 +11,7 @@ k8s
 **/gcp-sa.json
 **/*credentials*.json
 **/*-key.json
+client_secret*.json
 .dockerignore
 Dockerfile
 docker-compose.yml

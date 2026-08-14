@@ -14,6 +14,27 @@ export const DEFAULT_RETRIEVER_K = Number(process.env.RETRIEVER_K) || 3;
 /** Retriever k when frontend sends turbo: true */
 export const TURBO_RETRIEVER_K = Number(process.env.TURBO_RETRIEVER_K) || 10;
 
+/** Google OAuth 2.0 / OpenID (GIS) — no Passport, no sessions. */
+export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+export const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+/** Redirect URI registered in Google Cloud Console (auth-code flow only). */
+export const GOOGLE_REDIRECT_URI =
+  process.env.GOOGLE_REDIRECT_URI || "http://localhost:3001/api/auth/google/callback";
+/** HMAC secret for app JWTs issued after Google sign-in. */
+export const JWT_SECRET = process.env.JWT_SECRET || "";
+export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+/** MongoDB connection string (users collection for Google sign-in). */
+export const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/rag_users";
+/**
+ * When true, /api/query* and /api/manual* require Bearer JWT.
+ * Defaults to true if GOOGLE_CLIENT_ID is set.
+ */
+export const AUTH_REQUIRED =
+  process.env.AUTH_REQUIRED != null
+    ? !["0", "false", "no"].includes(String(process.env.AUTH_REQUIRED).toLowerCase())
+    : Boolean(GOOGLE_CLIENT_ID);
+
 // Conservative Vertex pacing to avoid 429 quota / QPM limits.
 export const EMBED_BATCH_SIZE = 24;
 export const EMBED_MAX_RETRIES = 12;

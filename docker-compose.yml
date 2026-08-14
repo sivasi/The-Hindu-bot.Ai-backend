@@ -8,3 +8,11 @@ services:
     environment:
       ANONYMIZED_TELEMETRY: "FALSE"
     restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./mongo_data:/data/db
+    restart: unless-stopped

@@ -27,6 +27,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: rag-api-config
+            - secretRef:
+                name: rag-api-secrets
+                optional: true
           readinessProbe:
             httpGet:
               path: /api/live

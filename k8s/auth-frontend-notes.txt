@@ -1,0 +1,45 @@
+# Google Sign-In — Option A (GIS ID token). NO backend redirect URI.
+# Google rejects IP redirects like http://34.93.159.106:30001/...
+#
+# ═══════════════════════════════════════════════════════════
+# Google Cloud Console → APIs & Services → Credentials
+# OAuth 2.0 Client ID type: Web application
+# ═══════════════════════════════════════════════════════════
+#
+# Authorized JavaScript origins ONLY (required):
+#   https://the-hindu-bot.netlify.app
+#   http://localhost:5173
+#
+# Authorized redirect URIs:
+#   Leave empty if possible.
+#   If Google forces at least one URI, use the FRONTEND domain (not the GKE IP):
+#   https://the-hindu-bot.netlify.app
+#   http://localhost:5173
+#
+# DO NOT add:
+#   http://34.93.159.106:30001/api/auth/google/callback   ← invalid (IP)
+#
+# ═══════════════════════════════════════════════════════════
+# Frontend flow
+# ═══════════════════════════════════════════════════════════
+#
+# 1) Env:
+#    VITE_GOOGLE_CLIENT_ID=<same Web client ID>
+#    VITE_API_URL=https://the-hindu-bot.netlify.app   (prod, via Netlify proxy)
+#
+# 2) Load GIS:
+#    <script src="https://accounts.google.com/gsi/client" async defer></script>
+#
+# 3) On credential (Google ID token):
+#    POST /api/auth/google
+#    { "idToken": "<credential>" }   // or { "credential": "..." }
+#    → { token, created, user: { id, email, name, picture, ... } }
+#
+# 4) Store app JWT (localStorage). Send on protected calls:
+#    Authorization: Bearer <app JWT>
+#
+# 5) PDF iframe:
+#    `${VITE_API_URL}/api/manual?token=${encodeURIComponent(appJwt)}#page=12`
+#
+# Protected: /api/query, /api/query/stream, /api/manual, /api/manual/info, /api/auth/me
+# Public:    /api/live, /api/health, POST /api/auth/google, GET /api/auth/config

@@ -1,0 +1,13 @@
+# Netlify: proxy API calls so the HTTPS site never talks to plain HTTP (mixed content).
+# Put this in the frontend repo root as `netlify.toml`, then set:
+#   VITE_API_URL=   (empty / same-origin)  OR  VITE_API_URL=https://the-hindu-bot.netlify.app
+#
+# Browser calls:  https://the-hindu-bot.netlify.app/api/...
+# Netlify forwards to: http://34.93.159.106:30001/api/...
+
+[[redirects]]
+  from = "/api/*"
+  to = "http://34.93.159.106:30001/api/:splat"
+  status = 200
+  force = true
+  headers = {X-From = "netlify-proxy"}

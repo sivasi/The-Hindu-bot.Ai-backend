@@ -9,10 +9,12 @@ api-key-request.json
 **/gcp-sa.json
 **/*credentials*.json
 **/*-key.json
+client_secret*.json
 
 # Runtime / ingest artifacts
 cache/
 chroma_data/
+mongo_data/
 data/*.pdf
 *.pdf
 

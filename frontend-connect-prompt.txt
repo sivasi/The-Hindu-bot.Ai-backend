@@ -1,0 +1,114 @@
+Update the existing frontend at https://the-hindu-bot.netlify.app so it talks to the live RAG backend on GKE, with Google Sign-In (GIS ID token → app JWT). No OAuth redirect to the backend IP.
+
+Do NOT rebuild the backend. Change frontend config + Netlify proxy + Google Sign-In UI.
+
+═══════════════════════════════════════
+WHY THIS MATTERS
+═══════════════════════════════════════
+- Site is HTTPS: https://the-hindu-bot.netlify.app
+- API is HTTP NodePort: http://34.93.159.106:30001
+- Browsers BLOCK https → http (mixed content).
+- Backend CORS allows: https://the-hindu-bot.netlify.app
+- Google does NOT allow IP redirect URIs — use GIS idToken flow only (no /api/auth/google/callback).
+
+Frontend MUST call same-origin `/api/...`; Netlify proxies to GKE.
+
+═══════════════════════════════════════
+1) ADD netlify.toml (frontend repo root)
+═══════════════════════════════════════
+[[redirects]]
+  from = "/api/*"
+  to = "http://34.93.159.106:30001/api/:splat"
+  status = 200
+  force = true
+
+═══════════════════════════════════════
+2) ENV
+═══════════════════════════════════════
+Production:
+  VITE_API_URL=https://the-hindu-bot.netlify.app
+  VITE_GOOGLE_CLIENT_ID=<Google OAuth Web Client ID>
+
+Local:
+  VITE_API_URL=http://localhost:3001
+  VITE_GOOGLE_CLIENT_ID=<same client id>
+
+NEVER call http://34.93.159.106:30001 from the browser on Netlify.
+
+═══════════════════════════════════════
+3) GOOGLE SIGN-IN (Option A — GIS only)
+═══════════════════════════════════════
+Google Cloud Console → OAuth Web client:
+  Authorized JavaScript origins:
+    https://the-hindu-bot.netlify.app
+    http://localhost:5173
+  Authorized redirect URIs:
+    leave empty OR if required use frontend only:
+    https://the-hindu-bot.netlify.app
+    http://localhost:5173
+  DO NOT use http://34.93.159.106:30001/...
+
+UI: require Google sign-in before Ask / PDF.
+
+Load script:
+  https://accounts.google.com/gsi/client
+
+Example (Sign In With Google → exchange credential for app JWT):
+
+  function handleGoogleCredential(response) {
+    // response.credential is the Google ID token
+    return fetch(`${import.meta.env.VITE_API_URL}/api/auth/google`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken: response.credential }),
+    }).then((r) => r.json()).then((data) => {
+      // data.token = app JWT; data.user = Mongo user; data.created = bool
+      localStorage.setItem("rag_token", data.token);
+      return data;
+    });
+  }
+
+  // Initialize button / One Tap with client_id = VITE_GOOGLE_CLIENT_ID
+  // callback: handleGoogleCredential
+
+On logout: clear localStorage token; optional POST /api/auth/logout.
+
+All protected API calls must send:
+  Authorization: Bearer ${localStorage.getItem("rag_token")}
+
+PDF iframe (cannot send Authorization header):
+  `${VITE_API_URL}/api/manual?token=${encodeURIComponent(token)}#page=${pageNumber}`
+
+Optional: GET /api/auth/me with Bearer token to restore session UI.
+Optional: GET /api/auth/config → { clientId } if you prefer loading client id from API.
+
+═══════════════════════════════════════
+4) RAG ENDPOINTS (after sign-in)
+═══════════════════════════════════════
+GET  /api/health
+GET  /api/manual?token=...
+GET  /api/manual/info          + Authorization
+POST /api/query/stream         + Authorization   ★ primary Ask
+POST /api/query                + Authorization   fallback
+
+Stream body: { "question": "...", "mode": "normal" | "turbo_short" | "turbo_research" }
+SSE over fetch POST (not EventSource). Events: status → (token if turbo_research) → result → done.
+
+═══════════════════════════════════════
+5) PRODUCT / UI
+═══════════════════════════════════════
+- Brand: The Hindu Bot.AI
+- Sign-in gate (Google button) → then Ask screen
+- Modes: Normal | Turbo Short | Turbo Research
+- Journey status → answer → sources (headline, page, excerpt); PDF jump via #page=N
+- Show signed-in user name/picture from /api/auth/me or sign-in response
+
+═══════════════════════════════════════
+6) ACCEPTANCE
+═══════════════════════════════════════
+[ ] Google Sign-In works on Netlify (GIS); no redirect to NodePort IP
+[ ] POST /api/auth/google with idToken returns app JWT + user (created true/false)
+[ ] Protected Ask/PDF calls send Authorization: Bearer <jwt>
+[ ] Network tab uses https://the-hindu-bot.netlify.app/api/... only
+[ ] No mixed-content errors; no Google “Invalid redirect / IP” errors
+[ ] Redeploy Netlify after netlify.toml + auth changes
