@@ -24,6 +24,15 @@ import {
   findUserByGoogleId,
   findUserById,
 } from "./services/users.js";
+import {
+  listSessions,
+  createSession,
+  getSessionWithMessages,
+  renameSession,
+  deleteSession,
+  appendTurn,
+} from "./services/chats.js";
+import { requireUserId, resolveUserId } from "./middleware/user.js";
 
 const app = express();
 const PDF_ABS = path.resolve(PDF_PATH);
@@ -38,7 +47,7 @@ app.use(
     exposedHeaders: ["Content-Type", "Cache-Control"],
   })
 );
-app.use(express.json({ limit: "64kb" }));
+app.use(express.json({ limit: "512kb" }));
 
 function writeSse(res, payload) {
   return new Promise((resolve, reject) => {
@@ -67,6 +76,11 @@ app.get("/", (_req, res) => {
       "POST /api/auth/google",
       "GET  /api/auth/me",
       "POST /api/auth/logout",
+      "GET  /api/chats",
+      "POST /api/chats",
+      "GET  /api/chats/:id",
+      "PATCH /api/chats/:id",
+      "DELETE /api/chats/:id",
       "GET  /api/manual",
       "GET  /api/manual/info",
       "POST /api/query",
@@ -185,6 +199,64 @@ app.post("/api/auth/logout", (_req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * Chat history (ChatGPT-style):
+ * - Each session = one sidebar "box" / conversation
+ * - Messages inside a session = that conversation thread
+ * - Different sessions = different boxes for the same user
+ */
+app.get("/api/chats", requireAuth, async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const sessions = await listSessions(userId, {
+      limit: Number(req.query.limit) || 50,
+    });
+    res.json({ sessions });
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: err?.message || "Failed to list chats" });
+  }
+});
+
+app.post("/api/chats", requireAuth, async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const session = await createSession(userId, { title: req.body?.title });
+    res.status(201).json({ session });
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: err?.message || "Failed to create chat" });
+  }
+});
+
+app.get("/api/chats/:id", requireAuth, async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const data = await getSessionWithMessages(req.params.id, userId);
+    res.json(data);
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: err?.message || "Failed to load chat" });
+  }
+});
+
+app.patch("/api/chats/:id", requireAuth, async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    const session = await renameSession(req.params.id, userId, req.body?.title);
+    res.json({ session });
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: err?.message || "Failed to rename chat" });
+  }
+});
+
+app.delete("/api/chats/:id", requireAuth, async (req, res) => {
+  try {
+    const userId = requireUserId(req);
+    await deleteSession(req.params.id, userId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: err?.message || "Failed to delete chat" });
+  }
+});
+
 /** JSON metadata for the archived PDF (for FE viewer chrome). */
 app.get("/api/manual/info", requireAuth, async (_req, res) => {
   try {
@@ -231,9 +303,33 @@ app.get("/api/manual", requireAuth, (req, res) => {
 
 app.post("/api/query", requireAuth, async (req, res) => {
   try {
-    const { question, k, mode, turbo } = req.body || {};
+    const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
     const result = await askQuestion({ question, k, mode, turbo });
-    res.json(result);
+
+    let chat = null;
+    const shouldSave = saveHistory !== false;
+    const userId = resolveUserId(req);
+    if (shouldSave && userId && question) {
+      try {
+        chat = await appendTurn({
+          userId,
+          sessionId: sessionId || null,
+          question,
+          answer: result?.answer,
+          sources: result?.sources,
+          meta: result?.meta,
+        });
+      } catch (histErr) {
+        console.warn("[query] chat save skipped:", histErr?.message || histErr);
+      }
+    }
+
+    res.json({
+      ...result,
+      sessionId: chat?.session?.id || sessionId || null,
+      session: chat?.session || undefined,
+      chatCreated: chat?.created || false,
+    });
   } catch (err) {
     const status = err?.status || 500;
     res.status(status).json({
@@ -245,9 +341,10 @@ app.post("/api/query", requireAuth, async (req, res) => {
 /**
  * SSE: pipeline journey events always.
  * LLM token stream only for mode=turbo_research ({ type: "token", text }).
+ * Pass sessionId to append this turn into an existing chat box; omit to create a new session.
  */
 app.post("/api/query/stream", requireAuth, async (req, res) => {
-  const { question, k, mode, turbo } = req.body || {};
+  const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -276,12 +373,47 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
   };
 
   try {
+    let finalResult = null;
     await askQuestion({
       question,
       k,
       mode,
       turbo,
       onEvent: async (event) => {
+        if (event?.type === "result") {
+          finalResult = event;
+          await send(event);
+          return;
+        }
+        if (event?.type === "done") {
+          const shouldSave = saveHistory !== false;
+          const userId = resolveUserId(req);
+          if (shouldSave && userId && question && finalResult?.answer != null) {
+            try {
+              const chat = await appendTurn({
+                userId,
+                sessionId: sessionId || null,
+                question,
+                answer: finalResult.answer,
+                sources: finalResult.sources,
+                meta: finalResult.meta,
+              });
+              await send({
+                type: "session",
+                sessionId: chat.session.id,
+                session: chat.session,
+                created: chat.created,
+              });
+            } catch (histErr) {
+              console.warn(
+                "[query/stream] chat save skipped:",
+                histErr?.message || histErr
+              );
+            }
+          }
+          await send(event);
+          return;
+        }
         await send(event);
       },
     });
@@ -334,10 +466,11 @@ async function start() {
     console.log(`  GET  /api/auth/config`);
     console.log(`  POST /api/auth/google   { idToken }`);
     console.log(`  GET  /api/auth/me`);
-    console.log(`  GET  /api/manual        (PDF inline, auth)`);
-    console.log(`  GET  /api/manual/info`);
-    console.log(`  POST /api/query         { "question": "...", "mode": "..." }`);
-    console.log(`  POST /api/query/stream  SSE pipeline status events`);
+    console.log(`  GET  /api/chats`);
+    console.log(`  POST /api/chats`);
+    console.log(`  GET  /api/chats/:id`);
+    console.log(`  POST /api/query         { question, mode, sessionId? }`);
+    console.log(`  POST /api/query/stream  SSE + optional session save`);
   });
 }
 

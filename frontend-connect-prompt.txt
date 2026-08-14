@@ -83,32 +83,95 @@ Optional: GET /api/auth/me with Bearer token to restore session UI.
 Optional: GET /api/auth/config → { clientId } if you prefer loading client id from API.
 
 ═══════════════════════════════════════
-4) RAG ENDPOINTS (after sign-in)
+4) CHAT HISTORY (ChatGPT / Gemini style)
+═══════════════════════════════════════
+Layout like ChatGPT:
+- Left sidebar: list of chat sessions (each = one “box” / conversation)
+- Main pane: messages for the active session (user + assistant turns)
+- Top: “New chat” button → clears main pane / creates empty session
+- Clicking a sidebar item loads that session’s messages
+- Rename / delete session from sidebar (⋯ menu)
+
+APIs (all need Authorization: Bearer <jwt>):
+
+GET    /api/chats
+→ { sessions: [{ id, title, preview, messageCount, lastMessageAt, createdAt }] }
+  Sort newest first — render as sidebar rows (title + preview + relative time).
+
+POST   /api/chats
+Body optional: { "title": "New chat" }
+→ { session }
+
+GET    /api/chats/:id
+→ { session, messages: [{ id, role: "user"|"assistant", content, sources?, meta?, createdAt }] }
+  Render messages in order like a chat thread.
+
+PATCH  /api/chats/:id
+Body: { "title": "Renamed title" }
+→ { session }
+
+DELETE /api/chats/:id
+→ { ok: true }
+
+Saving turns (automatic on Ask):
+POST /api/query/stream
+Body:
+{
+  "question": "...",
+  "mode": "normal" | "turbo_short" | "turbo_research",
+  "sessionId": "<optional — omit or null for first message in a New chat>"
+}
+
+SSE event order:
+  status… → (token…) → result → session → done
+
+On type=session:
+  { "type":"session", "sessionId":"...", "session":{...}, "created": true|false }
+  - Store sessionId in state for the next Ask in this thread
+  - If created, prepend/update sidebar with session
+  - Always refresh sidebar title/preview from event.session
+
+On type=result: append assistant message (and you already showed user message optimistically).
+
+“New chat” UX:
+  1) Clear activeSessionId + messages in UI
+  2) Optional: POST /api/chats for an empty box, or wait until first Ask (backend creates session if sessionId omitted)
+  3) Next Ask without sessionId creates a new sidebar entry titled from the question
+
+Do NOT mix messages from different sessionIds in one thread.
+
+═══════════════════════════════════════
+5) RAG ENDPOINTS (after sign-in)
 ═══════════════════════════════════════
 GET  /api/health
 GET  /api/manual?token=...
 GET  /api/manual/info          + Authorization
-POST /api/query/stream         + Authorization   ★ primary Ask
-POST /api/query                + Authorization   fallback
+POST /api/query/stream         + Authorization + sessionId?   ★ primary Ask
+POST /api/query                + Authorization + sessionId?   fallback
 
-Stream body: { "question": "...", "mode": "normal" | "turbo_short" | "turbo_research" }
-SSE over fetch POST (not EventSource). Events: status → (token if turbo_research) → result → done.
+Stream body: { "question": "...", "mode": "...", "sessionId": "..." }
+SSE over fetch POST (not EventSource). Events: status → (token if turbo_research) → result → session → done.
 
 ═══════════════════════════════════════
-5) PRODUCT / UI
+6) PRODUCT / UI
 ═══════════════════════════════════════
 - Brand: The Hindu Bot.AI
-- Sign-in gate (Google button) → then Ask screen
+- Sign-in gate (Google button) → chat shell (sidebar + main)
+- Sidebar = chat history boxes; main = active conversation
 - Modes: Normal | Turbo Short | Turbo Research
-- Journey status → answer → sources (headline, page, excerpt); PDF jump via #page=N
+- Journey status while waiting; answer + sources; PDF jump via #page=N
 - Show signed-in user name/picture from /api/auth/me or sign-in response
 
 ═══════════════════════════════════════
-6) ACCEPTANCE
+7) ACCEPTANCE
 ═══════════════════════════════════════
 [ ] Google Sign-In works on Netlify (GIS); no redirect to NodePort IP
 [ ] POST /api/auth/google with idToken returns app JWT + user (created true/false)
-[ ] Protected Ask/PDF calls send Authorization: Bearer <jwt>
+[ ] Sidebar lists sessions; New chat starts a fresh thread
+[ ] Asking saves into current session; switching sessions loads that thread only
+[ ] Rename + delete session work
+[ ] Stream includes type=session before done; FE keeps sessionId for follow-ups
+[ ] Protected calls send Authorization: Bearer <jwt>
 [ ] Network tab uses https://the-hindu-bot.netlify.app/api/... only
-[ ] No mixed-content errors; no Google “Invalid redirect / IP” errors
-[ ] Redeploy Netlify after netlify.toml + auth changes
+[ ] No mixed-content errors
+[ ] Redeploy Netlify after netlify.toml + auth + chat UI
