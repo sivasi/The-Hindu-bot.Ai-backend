@@ -30,7 +30,7 @@ export const MODES = {
 };
 
 const CHAT_AGENT_PREAMBLE = `You are a helpful chat agent for a newspaper archive Q&A assistant.
-Continue the conversation naturally like ChatGPT/Gemini: resolve follow-ups, pronouns, and references using the prior user questions when present.
+The user message is already a standalone question (follow-ups were resolved before retrieval).
 Answer ONLY using the provided retrieved context below. Do not invent facts outside that context.
 Each chunk is labeled with its page number and section. If the user asked about a specific page or section, those chunks are already filtered — summarize the article text. Do not refuse just because the body does not repeat the page or section.
 If the question has more than one topic, answer each topic from the retrieved context.
@@ -64,7 +64,6 @@ const TURBO_RESEARCH_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
 
 You are also a research-style chat agent. Write a research-style answer of up to 300 words maximum (never exceed 300 words; do not pad with filler):
 - Open with a clear direct answer to the current user message.
-- Use prior conversation only to interpret what the user means (topics, entities, follow-ups).
 - Synthesize evidence from multiple retrieved chunks/articles when available.
 - Include supporting detail, figures, names, dates, and short quotes from the context.
 - Connect related points; note nuances or caveats if the context shows them.
@@ -155,47 +154,6 @@ export function parseStoredChunk(doc) {
     pageContent,
     metadata: meta,
   };
-}
-
-/**
- * Combine prior user questions + current question into one string.
- * This combined text is embedded for vector retrieval.
- */
-export function buildCombinedRetrievalQuery(previousQuestions, currentQuestion) {
-  const current = String(currentQuestion || "").trim();
-  const prev = (previousQuestions || [])
-    .map((q) => String(q || "").trim())
-    .filter(Boolean);
-  if (!prev.length) return current;
-  // Join as continuous sentences so the embedding captures full conversational intent.
-  return [...prev, current].join(" ");
-}
-
-/**
- * Human message for the chat agent: prior turns + current question.
- */
-export function buildChatAgentInput(priorTurns, currentQuestion) {
-  const current = String(currentQuestion || "").trim();
-  const turns = (priorTurns || []).filter(
-    (t) => t?.content && (t.role === "user" || t.role === "assistant")
-  );
-  if (!turns.length) return current;
-
-  const history = turns
-    .map((t) =>
-      t.role === "user"
-        ? `User: ${t.content}`
-        : `Assistant: ${t.content}`
-    )
-    .join("\n");
-
-  return `Conversation so far:
-${history}
-
-Current user message:
-${current}
-
-Respond as the chat agent to the current user message. Use the conversation for follow-up meaning; use retrieved context for facts.`;
 }
 
 async function ensureReady() {
@@ -379,8 +337,8 @@ function resolveRequest({ question, k, mode, turbo }) {
  * then a final { type: "result", answer, sources, meta }.
  *
  * Chat continuity (same sessionId):
- *   - previousQuestions → combined with current question → embedded for retrieval
- *   - priorTurns → included in the chat-agent human prompt
+ *   - conversationSummary → query-decomposition resolves follow-ups, then splits topics
+ *   - answer LLM sees the standalone rewritten question only (no transcript)
  *
  * mode:
  *   - "normal"         → k=3, concise (no token stream)
@@ -392,8 +350,7 @@ export async function askQuestion({
   k,
   mode,
   turbo,
-  previousQuestions = [],
-  priorTurns = [],
+  conversationSummary = "",
   onEvent,
 } = {}) {
   const emit = async (event) => {
@@ -407,14 +364,11 @@ export async function askQuestion({
     turbo,
   });
 
-  const retrievalQuery = buildCombinedRetrievalQuery(previousQuestions, q);
-  const agentInput = buildChatAgentInput(priorTurns, q);
-
   await emit({
     type: "status",
     step: "searching",
-    message: previousQuestions?.length
-      ? "Searching with prior chat questions + current question"
+    message: conversationSummary
+      ? "Resolving follow-up from chat summary, then searching"
       : cfg.searchMessage,
   });
 
@@ -430,9 +384,14 @@ export async function askQuestion({
     maxOutputTokens: 1024,
     thinkingBudget: 0,
   });
-  const topics = await decomposeQuestion(retrievalQuery, decomposer);
+  const { topics, standalone } = await decomposeQuestion(q, decomposer, {
+    conversationSummary,
+  });
+  const agentInput = standalone || q;
   logger.info("rag", "decomposed question", {
     question: q.slice(0, 240),
+    standalone: agentInput.slice(0, 240),
+    usedSummary: Boolean(String(conversationSummary || "").trim()),
     topK,
     mode: answerMode,
     topics: topics.map((t) => ({
@@ -524,8 +483,9 @@ export async function askQuestion({
       model: getChatModel(),
       collection: CHROMA_COLLECTION,
       chatAgent: true,
-      priorQuestionCount: (previousQuestions || []).length,
-      retrievalQueryPreview: retrievalQuery.slice(0, 240),
+      usedSummary: Boolean(String(conversationSummary || "").trim()),
+      standaloneQuestion: agentInput.slice(0, 240),
+      retrievalQueryPreview: agentInput.slice(0, 240),
     },
   };
 

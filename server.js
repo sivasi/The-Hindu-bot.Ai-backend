@@ -38,9 +38,9 @@ import {
   renameSession,
   deleteSession,
   appendTurn,
-  getPriorUserQuestions,
-  getPriorTurns,
+  getSessionSummary,
 } from "./services/chats.js";
+import { scheduleConversationSummaryRefresh } from "./services/conversationSummary.js";
 import { requireUserId, resolveUserId } from "./middleware/user.js";
 import {
   listExamSections,
@@ -321,7 +321,7 @@ app.delete("/api/chats/:id", requireAuth, async (req, res) => {
  *   { section, count, articles }
  * Example: /api/discover/section/National
  */
-app.get("/api/discover", requireAuth, async (_req, res) => {
+app.get("/api/discover", async (_req, res) => {
   try {
     const data = await getDiscoverHome();
     res.json(data);
@@ -332,7 +332,7 @@ app.get("/api/discover", requireAuth, async (_req, res) => {
   }
 });
 
-app.get("/api/discover/section/:section", requireAuth, async (req, res) => {
+app.get("/api/discover/section/:section", async (req, res) => {
   try {
     const section = decodeURIComponent(req.params.section || "");
     const data = await getDiscoverSection(section);
@@ -430,21 +430,34 @@ app.get("/api/manual", requireAuth, (req, res) => {
   });
 });
 
-/** Load prior chat turns for combined retrieval + chat-agent prompt. */
+/** Rolling session summary for follow-up rewrite in query decomposition. */
 async function loadChatContinuity(sessionId, userId) {
-  if (!sessionId || !userId) {
-    return { previousQuestions: [], priorTurns: [] };
-  }
+  if (!sessionId || !userId) return { conversationSummary: "" };
   try {
-    const [previousQuestions, priorTurns] = await Promise.all([
-      getPriorUserQuestions(sessionId, userId, { limit: 8 }),
-      getPriorTurns(sessionId, userId, { limit: 12 }),
-    ]);
-    return { previousQuestions, priorTurns };
+    const conversationSummary = await getSessionSummary(sessionId, userId);
+    return { conversationSummary };
   } catch (err) {
     console.warn("[chat continuity]", err?.message || err);
-    return { previousQuestions: [], priorTurns: [] };
+    return { conversationSummary: "" };
   }
+}
+
+function queueSummaryRefresh({
+  chat,
+  userId,
+  previousSummary,
+  question,
+  answer,
+}) {
+  if (!chat?.session?.id || !userId || answer == null) return;
+  scheduleConversationSummaryRefresh({
+    sessionId: chat.session.id,
+    userId,
+    previousSummary,
+    question,
+    answer,
+    messageCount: chat.session.messageCount,
+  });
 }
 
 app.post("/api/query", requireAuth, async (req, res) => {
@@ -458,7 +471,7 @@ app.post("/api/query", requireAuth, async (req, res) => {
       turbo: turbo ?? null,
       sessionId: sessionId || null,
     });
-    const { previousQuestions, priorTurns } = await loadChatContinuity(
+    const { conversationSummary } = await loadChatContinuity(
       sessionId,
       userId
     );
@@ -468,8 +481,7 @@ app.post("/api/query", requireAuth, async (req, res) => {
       k,
       mode,
       turbo,
-      previousQuestions,
-      priorTurns,
+      conversationSummary,
     });
 
     logger.info("query", "query answered", {
@@ -490,6 +502,13 @@ app.post("/api/query", requireAuth, async (req, res) => {
           answer: result?.answer,
           sources: result?.sources,
           meta: result?.meta,
+        });
+        queueSummaryRefresh({
+          chat,
+          userId,
+          previousSummary: conversationSummary,
+          question,
+          answer: result?.answer,
         });
       } catch (histErr) {
         console.warn("[query] chat save skipped:", histErr?.message || histErr);
@@ -514,7 +533,7 @@ app.post("/api/query", requireAuth, async (req, res) => {
 /**
  * SSE: pipeline journey events always.
  * LLM token stream only for mode=turbo_research ({ type: "token", text }).
- * Pass sessionId to continue a chat box (prior questions combined for embedding + agent prompt).
+ * Pass sessionId to continue a chat box (summary resolves follow-ups in query decomposition).
  */
 app.post("/api/query/stream", requireAuth, async (req, res) => {
   const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
@@ -525,7 +544,7 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
     k: k ?? null,
     sessionId: sessionId || null,
   });
-  const { previousQuestions, priorTurns } = await loadChatContinuity(
+  const { conversationSummary } = await loadChatContinuity(
     sessionId,
     userId
   );
@@ -563,8 +582,7 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
       k,
       mode,
       turbo,
-      previousQuestions,
-      priorTurns,
+      conversationSummary,
       onEvent: async (event) => {
         if (event?.type === "result") {
           finalResult = event;
@@ -582,6 +600,13 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
                 answer: finalResult.answer,
                 sources: finalResult.sources,
                 meta: finalResult.meta,
+              });
+              queueSummaryRefresh({
+                chat,
+                userId,
+                previousSummary: conversationSummary,
+                question,
+                answer: finalResult.answer,
               });
               await send({
                 type: "session",
@@ -683,22 +708,22 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    console.log(`API listening on http://localhost:${PORT}`);
-    console.log(`  Auth: Google GIS idToken → app JWT (required=${AUTH_REQUIRED})`);
-    console.log(`  MongoDB users: ${isMongoConfigured() ? (isMongoReady() ? "connected" : "configured") : "disabled"}`);
-    console.log(`  GET  /api/live`);
-    console.log(`  GET  /api/health`);
-    console.log(`  GET  /api/auth/config`);
-    console.log(`  POST /api/auth/google   { idToken }`);
-    console.log(`  GET  /api/auth/me`);
-    console.log(`  GET  /api/chats`);
-    console.log(`  POST /api/chats`);
-    console.log(`  GET  /api/chats/:id`);
-    console.log(`  GET  /api/discover      sections + Front Page articles`);
-    console.log(`  GET  /api/discover/section/:section`);
-    console.log(`  POST /api/query         { question, mode, sessionId? }`);
-    console.log(`  POST /api/query/stream  SSE + optional session save`);
-    console.log(`  GET  /api/logs          persisted Mongo logs`);
+    logger.info("server", `API listening on http://localhost:${PORT}`);
+    logger.info("server", `Auth: Google GIS idToken → app JWT (required=${AUTH_REQUIRED})`);
+    logger.info("server", `MongoDB users: ${isMongoConfigured() ? (isMongoReady() ? "connected" : "configured") : "disabled"}`);
+    logger.info("server", "GET /api/live");
+    logger.info("server", "GET /api/health");
+    logger.info("server", "GET /api/auth/config");
+    logger.info("server", "POST /api/auth/google { idToken }");
+    logger.info("server", "GET /api/auth/me");
+    logger.info("server", "GET /api/chats");
+    logger.info("server", "POST /api/chats");
+    logger.info("server", "GET /api/chats/:id");
+    logger.info("server", "GET /api/discover (public) sections + Front Page articles");
+    logger.info("server", "GET /api/discover/section/:section (public)");
+    logger.info("server", "POST /api/query { question, mode, sessionId? }");
+    logger.info("server", "POST /api/query/stream SSE + optional session save");
+    logger.info("server", "GET /api/logs persisted Mongo logs");
   });
 }
 

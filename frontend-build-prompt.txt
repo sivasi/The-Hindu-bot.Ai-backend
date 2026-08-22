@@ -51,8 +51,7 @@ File is large (~86MB) — rely on browser / Range streaming.
 ───────────────────────────────────────
 1c) DISCOVER — curated exam articles (Mongo `examarticles`)
 ───────────────────────────────────────
-Auth required on these routes (same as other protected APIs):
-  Authorization: Bearer <app JWT>
+These Discover routes are public (no Authorization header).
 
 Storage model: one Mongo document per article in collection `examarticles`.
 Discover does NOT use a separate collection — it groups those docs by `section`.
@@ -109,9 +108,7 @@ Notes:
 - Do NOT load all sections’ articles here — only Front Page feed + section names.
 
 Example:
-  const res = await fetch(`${import.meta.env.VITE_API_URL}/api/discover`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(`${import.meta.env.VITE_API_URL}/api/discover`);
   const { sections, frontPage } = await res.json();
   // sections → chip list; frontPage.articles → home article list
 
@@ -135,9 +132,7 @@ Invalid section name → 400 with error message listing allowed sections.
 Example:
   async function loadSection(sectionName) {
     const path = `/api/discover/section/${encodeURIComponent(sectionName)}`;
-    const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`);
     if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
     return res.json(); // { section, count, articles }
   }

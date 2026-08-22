@@ -105,27 +105,39 @@ export async function getSessionWithMessages(sessionId, userId) {
   };
 }
 
-/** Prior user questions in a session (oldest → newest), for combined retrieval query. */
-export async function getPriorUserQuestions(sessionId, userId, { limit = 8 } = {}) {
-  const { messages } = await getSessionWithMessages(sessionId, userId);
-  const questions = messages
-    .filter((m) => m.role === "user" && m.content?.trim())
-    .map((m) => m.content.trim());
-  if (questions.length <= limit) return questions;
-  return questions.slice(-limit);
+/** Rolling conversation memory used to resolve follow-ups. Empty on new chats. */
+export async function getSessionSummary(sessionId, userId) {
+  if (!sessionId || !userId) return "";
+  const session = await getSessionForUser(sessionId, userId);
+  return String(session.summary || "").trim();
 }
 
-/** Recent turns (user+assistant) for chat-agent prompt grounding. */
-export async function getPriorTurns(sessionId, userId, { limit = 12 } = {}) {
-  const { messages } = await getSessionWithMessages(sessionId, userId);
-  const turns = messages
-    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content?.trim())
-    .map((m) => ({
-      role: m.role,
-      content: String(m.content).trim().slice(0, 800),
-    }));
-  if (turns.length <= limit) return turns;
-  return turns.slice(-limit);
+/**
+ * Write a newer rolling summary. Ignores the write if a later turn already saved.
+ */
+export async function saveSessionSummary({
+  sessionId,
+  userId,
+  summary,
+  messageCount,
+}) {
+  await ensureMongo();
+  const text = String(summary || "").trim();
+  if (!sessionId || !userId || !text) return false;
+  const count = Number(messageCount) || 0;
+  const result = await ChatSession.updateOne(
+    {
+      _id: sessionId,
+      userId,
+      $or: [
+        { summaryAtCount: { $exists: false } },
+        { summaryAtCount: null },
+        { summaryAtCount: { $lt: count } },
+      ],
+    },
+    { $set: { summary: text.slice(0, 2000), summaryAtCount: count } }
+  );
+  return (result.modifiedCount || 0) > 0;
 }
 
 export async function renameSession(sessionId, userId, title) {

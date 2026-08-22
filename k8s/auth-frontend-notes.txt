@@ -42,4 +42,5 @@
 #    `${VITE_API_URL}/api/manual?token=${encodeURIComponent(appJwt)}#page=12`
 #
 # Protected: /api/query, /api/query/stream, /api/manual, /api/manual/info, /api/auth/me
-# Public:    /api/live, /api/health, POST /api/auth/google, GET /api/auth/config
+# Public:    /api/live, /api/health, POST /api/auth/google, GET /api/auth/config,
+#            GET /api/discover, GET /api/discover/section/:section

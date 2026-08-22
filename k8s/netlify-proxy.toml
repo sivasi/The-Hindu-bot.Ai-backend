@@ -3,11 +3,11 @@
 #   VITE_API_URL=   (empty / same-origin)  OR  VITE_API_URL=https://the-hindu-bot.netlify.app
 #
 # Browser calls:  https://the-hindu-bot.netlify.app/api/...
-# Netlify forwards to: http://34.100.175.180:30001/api/...
+# Netlify forwards to: http://35.200.239.39:30001/api/...
 
 [[redirects]]
   from = "/api/*"
-  to = "http://34.100.175.180:30001/api/:splat"
+  to = "http://35.200.239.39:30001/api/:splat"
   status = 200
   force = true
   headers = {X-From = "netlify-proxy"}

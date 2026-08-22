@@ -29,6 +29,8 @@ export const LEXICAL_INDEX_PATH = path.join("cache", "lexical-index.json");
 export const LEXICAL_INDEX_VERSION = 2;
 /** Cap how many single-topic searches a decomposed question can spawn. */
 export const MAX_DECOMPOSED_QUERIES = 3;
+/** Rolling chat-memory size stored on ChatSession.summary. */
+export const CONVERSATION_SUMMARY_MAX_CHARS = 1600;
 
 /** Wider pool per retriever before Reciprocal Rank Fusion. */
 export const HYBRID_CANDIDATE_K = 20;

@@ -1,12 +1,20 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { MAX_DECOMPOSED_QUERIES } from "../config.js";
+import { logger } from "./logger.js";
 
 const DECOMPOSE_SYSTEM = `You prepare newspaper-archive vector-search queries.
 
 The index stores headline-style chunks (Title Case names, newsroom wording). Rewrite for embedding cosine similarity, not for chatting with a user.
 
+Step 0 — Resolve follow-ups from conversation summary
+- The human message may include a conversation summary plus the current user message.
+- If the current message uses pronouns, "it", "that", "the court", "he", or other follow-ups, rewrite it into a standalone question using ONLY entities from the summary.
+- Do not pull extra topics from the summary that the user did not ask about now.
+- If there is no summary, or the current message is already self-contained, keep its meaning.
+- Put that standalone question in \`standalone\`. This is what the answer model will see.
+
 Step 1 — Decompose
-- If the question asks about two or more unrelated topics, emit one object per topic.
+- Split \`standalone\` (not the raw follow-up) if it asks about two or more unrelated topics; emit one object per topic.
 - If it is already a single topic, emit exactly one object.
 - Keep page / section / "whole" hints on the query they belong to. Do not rewrite those filter phrases.
 - Do not invent topics or add extra questions.
@@ -26,35 +34,41 @@ Step 3 — Flag vague searches
 - Do not invent a specific disaster type in \`search\` if the user only said "natural disaster". Leave the umbrella term and set "vague": true so HyDE can run.
 - Filter-only queries such as "summarize the whole page 7?" are never vague.
 
-Return ONLY JSON of the form {"queries":[{"search":"...","vague":false}]} with no markdown.
+Return ONLY JSON of the form {"standalone":"...","queries":[{"search":"...","vague":false}]} with no markdown.
 
 Examples:
+Conversation summary: (none)
 User: What was the employment growth in the power sector, and what did the ground report say about the Wayanad landslide?
-JSON: {"queries":[{"search":"Power sector employment growth","vague":false},{"search":"Wayanad landslide ground report","vague":false}]}
+JSON: {"standalone":"What was the employment growth in the power sector, and what did the ground report say about the Wayanad landslide?","queries":[{"search":"Power sector employment growth","vague":false},{"search":"Wayanad landslide ground report","vague":false}]}
 
+Conversation summary: User asked about Manipur ethnic violence; assistant summarised the ground report.
+User: what did the court say?
+JSON: {"standalone":"What did the court say about the Manipur ethnic violence?","queries":[{"search":"Manipur ethnic violence court","vague":false}]}
+
+Conversation summary: (none)
 User: jobs at the electricity company
-JSON: {"queries":[{"search":"Power sector employment","vague":false}]}
+JSON: {"standalone":"What is employment like at the electricity company?","queries":[{"search":"Power sector employment","vague":false}]}
 
 User: A man was shooting the animal in Kaziranga
-JSON: {"queries":[{"search":"Kaziranga hunting","vague":false}]}
+JSON: {"standalone":"What happened when a man was shooting the animal in Kaziranga?","queries":[{"search":"Kaziranga hunting","vague":false}]}
 
 User: Why did the building falling down happen in Delhi?
-JSON: {"queries":[{"search":"Delhi building collapse","vague":false}]}
+JSON: {"standalone":"Why did the building collapse in Delhi?","queries":[{"search":"Delhi building collapse","vague":false}]}
 
 User: What did that 2019 economics paper say about farm loans?
-JSON: {"queries":[{"search":"2019 economics paper farm loans","vague":false}]}
+JSON: {"standalone":"What did that 2019 economics paper say about farm loans?","queries":[{"search":"2019 economics paper farm loans","vague":false}]}
 
 User: What did that paper say about flooding after the Assam rains?
-JSON: {"queries":[{"search":"Assam flood paper","vague":false}]}
+JSON: {"standalone":"What did that paper say about flooding after the Assam rains?","queries":[{"search":"Assam flood paper","vague":false}]}
 
 User: What did that paper say about natural disasters?
-JSON: {"queries":[{"search":"natural disaster paper","vague":true}]}
+JSON: {"standalone":"What did that paper say about natural disasters?","queries":[{"search":"natural disaster paper","vague":true}]}
 
 User: What did that paper say?
-JSON: {"queries":[{"search":"that paper","vague":true}]}
+JSON: {"standalone":"What did that paper say?","queries":[{"search":"that paper","vague":true}]}
 
 User: summarize the whole page 7?
-JSON: {"queries":[{"search":"summarize the whole page 7?","vague":false}]}`;
+JSON: {"standalone":"summarize the whole page 7?","queries":[{"search":"summarize the whole page 7?","vague":false}]}`;
 
 function extractJsonObject(text) {
   const raw = String(text || "").trim();
@@ -132,26 +146,51 @@ function logTopics(topics) {
   });
 }
 
+function buildHumanMessage(question, conversationSummary) {
+  const summary = cleanText(conversationSummary) || "(none)";
+  return `Conversation summary:\n${summary}\n\nCurrent user message:\n${question}`;
+}
+
 /**
- * Split a compound question and rewrite each part for embedding search.
+ * Resolve follow-ups from conversation summary, then split/rewrite for retrieval.
  * Vague topics are flagged so retrieval can run HyDE instead of embedding `search`.
+ * @returns {{ topics: Array<{search: string, vague: boolean}>, standalone: string }}
  */
-export async function decomposeQuestion(question, llm) {
+export async function decomposeQuestion(question, llm, { conversationSummary } = {}) {
   const original = String(question || "").trim();
-  if (!original) return fallbackTopics(original);
+  if (!original) {
+    return { topics: fallbackTopics(original), standalone: original };
+  }
 
   let topics = fallbackTopics(original);
+  let standalone = original;
   try {
+    const human = buildHumanMessage(original, conversationSummary);
+    logger.info(
+      "query-decomposition",
+      `llm input ${JSON.stringify({
+        question: original,
+        summary: String(conversationSummary || "").trim() || "(none)",
+      })}`
+    );
     const result = await llm.generate([
-      [new SystemMessage(DECOMPOSE_SYSTEM), new HumanMessage(original)],
+      [new SystemMessage(DECOMPOSE_SYSTEM), new HumanMessage(human)],
     ]);
     const raw = result.generations?.[0]?.[0]?.message;
     if (!raw) {
       console.warn("[query-decomposition] empty model output; using original");
     } else {
       const parsed = extractJsonObject(messageText(raw));
+      logger.info(
+        "query-decomposition",
+        parsed
+          ? `llm json ${JSON.stringify(parsed)}`
+          : `llm json (unparsed) ${messageText(raw)}`
+      );
       if (Array.isArray(parsed?.queries)) {
         topics = normalizeQueries(parsed.queries, original);
+        const resolved = cleanText(parsed.standalone);
+        if (resolved) standalone = resolved;
       } else {
         console.warn("[query-decomposition] invalid LLM JSON; using original");
       }
@@ -163,8 +202,11 @@ export async function decomposeQuestion(question, llm) {
     );
   }
 
+  if (standalone !== original) {
+    console.log(`[query-decomposition] standalone: ${standalone}`);
+  }
   logTopics(topics);
-  return topics;
+  return { topics, standalone };
 }
 
 export function documentKey(doc) {

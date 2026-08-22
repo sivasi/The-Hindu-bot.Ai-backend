@@ -31,6 +31,18 @@ const chatSessionSchema = new mongoose.Schema(
       default: Date.now,
       index: true,
     },
+    /** Rolling memory for follow-up rewrite (not shown to the frontend). */
+    summary: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 2000,
+    },
+    /** messageCount when summary was last written (stale-job guard). */
+    summaryAtCount: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
