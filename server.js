@@ -11,6 +11,13 @@ import {
   GOOGLE_CLIENT_ID,
   AUTH_REQUIRED,
 } from "./config.js";
+import {
+  installConsoleCapture,
+  logger,
+  runWithLogContext,
+  createRequestId,
+  flushLogs,
+} from "./services/logger.js";
 import { getHealth, readProgress } from "./services/chroma.js";
 import { askQuestion, warmRag } from "./services/rag.js";
 import {
@@ -35,6 +42,17 @@ import {
   getPriorTurns,
 } from "./services/chats.js";
 import { requireUserId, resolveUserId } from "./middleware/user.js";
+import {
+  listExamSections,
+  listExamArticles,
+  getExamArticleById,
+  getDiscoverHome,
+  getDiscoverSection,
+} from "./services/examArticles.js";
+import { EXAM_SECTIONS } from "./models/ExamArticle.js";
+import { AppLog } from "./models/AppLog.js";
+
+installConsoleCapture();
 
 const app = express();
 const PDF_ABS = path.resolve(PDF_PATH);
@@ -50,6 +68,34 @@ app.use(
   })
 );
 app.use(express.json({ limit: "512kb" }));
+
+app.use((req, res, next) => {
+  const requestId = createRequestId();
+  req.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+  const started = Date.now();
+  runWithLogContext(
+    {
+      requestId,
+      method: req.method,
+      path: req.path,
+    },
+    () => {
+      res.on("finish", () => {
+        if (req.path === "/api/live") return;
+        logger.info(
+          "http",
+          `${req.method} ${req.path} ${res.statusCode}`,
+          {
+            status: res.statusCode,
+            ms: Date.now() - started,
+          }
+        );
+      });
+      next();
+    }
+  );
+});
 
 function writeSse(res, payload) {
   return new Promise((resolve, reject) => {
@@ -85,8 +131,14 @@ app.get("/", (_req, res) => {
       "DELETE /api/chats/:id",
       "GET  /api/manual",
       "GET  /api/manual/info",
+      "GET  /api/discover",
+      "GET  /api/discover/section/:section",
+      "GET  /api/exam/sections",
+      "GET  /api/exam/articles",
+      "GET  /api/exam/articles/:id",
       "POST /api/query",
       "POST /api/query/stream",
+      "GET  /api/logs",
     ],
   });
 });
@@ -259,6 +311,81 @@ app.delete("/api/chats/:id", requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * Discover home: all section names (+ counts) and Front Page articles.
+ * GET /api/discover
+ *   { sections: [{ section, count }], frontPage: { section, count, articles } }
+ *
+ * On-demand section articles:
+ * GET /api/discover/section/:section
+ *   { section, count, articles }
+ * Example: /api/discover/section/National
+ */
+app.get("/api/discover", requireAuth, async (_req, res) => {
+  try {
+    const data = await getDiscoverHome();
+    res.json(data);
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to load discover feed",
+    });
+  }
+});
+
+app.get("/api/discover/section/:section", requireAuth, async (req, res) => {
+  try {
+    const section = decodeURIComponent(req.params.section || "");
+    const data = await getDiscoverSection(section);
+    res.json(data);
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to load section articles",
+    });
+  }
+});
+
+/**
+ * Exam-prep curated newspaper viewer helpers.
+ */
+app.get("/api/exam/sections", requireAuth, async (_req, res) => {
+  try {
+    const sections = await listExamSections();
+    res.json({ sections, all: EXAM_SECTIONS });
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to list exam sections",
+    });
+  }
+});
+
+app.get("/api/exam/articles", requireAuth, async (req, res) => {
+  try {
+    const data = await listExamArticles({
+      section: req.query.section,
+      relevance: req.query.relevance,
+      limit: req.query.limit,
+      skip: req.query.skip,
+      q: req.query.q,
+    });
+    res.json(data);
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to list exam articles",
+    });
+  }
+});
+
+app.get("/api/exam/articles/:id", requireAuth, async (req, res) => {
+  try {
+    const article = await getExamArticleById(req.params.id);
+    res.json({ article });
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to load exam article",
+    });
+  }
+});
+
 /** JSON metadata for the archived PDF (for FE viewer chrome). */
 app.get("/api/manual/info", requireAuth, async (_req, res) => {
   try {
@@ -324,6 +451,13 @@ app.post("/api/query", requireAuth, async (req, res) => {
   try {
     const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
     const userId = resolveUserId(req);
+    logger.info("query", "POST /api/query", {
+      question: String(question || "").slice(0, 240),
+      mode: mode || null,
+      k: k ?? null,
+      turbo: turbo ?? null,
+      sessionId: sessionId || null,
+    });
     const { previousQuestions, priorTurns } = await loadChatContinuity(
       sessionId,
       userId
@@ -336,6 +470,13 @@ app.post("/api/query", requireAuth, async (req, res) => {
       turbo,
       previousQuestions,
       priorTurns,
+    });
+
+    logger.info("query", "query answered", {
+      mode: result?.meta?.mode,
+      k: result?.meta?.k,
+      sources: result?.sources?.length ?? 0,
+      answerChars: String(result?.answer || "").length,
     });
 
     let chat = null;
@@ -363,6 +504,7 @@ app.post("/api/query", requireAuth, async (req, res) => {
     });
   } catch (err) {
     const status = err?.status || 500;
+    logger.error("query", err?.message || "Query failed", { status });
     res.status(status).json({
       error: err?.message || "Query failed",
     });
@@ -377,6 +519,12 @@ app.post("/api/query", requireAuth, async (req, res) => {
 app.post("/api/query/stream", requireAuth, async (req, res) => {
   const { question, k, mode, turbo, sessionId, saveHistory } = req.body || {};
   const userId = resolveUserId(req);
+  logger.info("query", "POST /api/query/stream", {
+    question: String(question || "").slice(0, 240),
+    mode: mode || null,
+    k: k ?? null,
+    sessionId: sessionId || null,
+  });
   const { previousQuestions, priorTurns } = await loadChatContinuity(
     sessionId,
     userId
@@ -460,6 +608,7 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
       (typeof err === "string" && err) ||
       "Query failed";
     console.error("[query/stream]", message, err?.stack || err);
+    logger.error("query", message, { stream: true });
     await send({
       type: "error",
       message,
@@ -471,6 +620,43 @@ app.post("/api/query/stream", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/api/logs", requireAuth, async (req, res) => {
+  try {
+    await flushLogs();
+    const filter = {};
+    if (req.query.source) filter.source = String(req.query.source);
+    if (req.query.level) filter.level = String(req.query.level);
+    if (req.query.requestId) filter.requestId = String(req.query.requestId);
+    if (req.query.q) {
+      filter.message = { $regex: String(req.query.q), $options: "i" };
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 300);
+    const logs = await AppLog.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    res.json({
+      count: logs.length,
+      logs: logs.map((row) => ({
+        id: String(row._id),
+        createdAt: row.createdAt,
+        level: row.level,
+        source: row.source,
+        message: row.message,
+        requestId: row.requestId,
+        method: row.method,
+        path: row.path,
+        userId: row.userId,
+        meta: row.meta,
+      })),
+    });
+  } catch (err) {
+    res.status(err?.status || 500).json({
+      error: err?.message || "Failed to load logs",
+    });
+  }
+});
+
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
@@ -479,6 +665,8 @@ async function start() {
   if (isMongoConfigured()) {
     try {
       await connectMongo();
+      await flushLogs();
+      logger.info("server", "mongo connected");
     } catch (err) {
       console.warn(
         `[mongo] startup connect failed (sign-in will retry): ${err?.message || err}`
@@ -506,8 +694,11 @@ async function start() {
     console.log(`  GET  /api/chats`);
     console.log(`  POST /api/chats`);
     console.log(`  GET  /api/chats/:id`);
+    console.log(`  GET  /api/discover      sections + Front Page articles`);
+    console.log(`  GET  /api/discover/section/:section`);
     console.log(`  POST /api/query         { question, mode, sessionId? }`);
     console.log(`  POST /api/query/stream  SSE + optional session save`);
+    console.log(`  GET  /api/logs          persisted Mongo logs`);
   });
 }
 

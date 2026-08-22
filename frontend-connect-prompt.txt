@@ -6,7 +6,7 @@ Do NOT rebuild the backend. Change frontend config + Netlify proxy + Google Sign
 WHY THIS MATTERS
 ═══════════════════════════════════════
 - Site is HTTPS: https://the-hindu-bot.netlify.app
-- API is HTTP NodePort: http://34.93.159.106:30001
+- API is HTTP NodePort: http://34.100.175.180:30001
 - Browsers BLOCK https → http (mixed content).
 - Backend CORS allows: https://the-hindu-bot.netlify.app
 - Google does NOT allow IP redirect URIs — use GIS idToken flow only (no /api/auth/google/callback).
@@ -18,7 +18,7 @@ Frontend MUST call same-origin `/api/...`; Netlify proxies to GKE.
 ═══════════════════════════════════════
 [[redirects]]
   from = "/api/*"
-  to = "http://34.93.159.106:30001/api/:splat"
+  to = "http://34.100.175.180:30001/api/:splat"
   status = 200
   force = true
 
@@ -33,7 +33,7 @@ Local:
   VITE_API_URL=http://localhost:3001
   VITE_GOOGLE_CLIENT_ID=<same client id>
 
-NEVER call http://34.93.159.106:30001 from the browser on Netlify.
+NEVER call http://34.100.175.180:30001 from the browser on Netlify.
 
 ═══════════════════════════════════════
 3) GOOGLE SIGN-IN (Option A — GIS only)
@@ -46,7 +46,7 @@ Google Cloud Console → OAuth Web client:
     leave empty OR if required use frontend only:
     https://the-hindu-bot.netlify.app
     http://localhost:5173
-  DO NOT use http://34.93.159.106:30001/...
+  DO NOT use http://34.100.175.180:30001/...
 
 UI: require Google sign-in before Ask / PDF.
 

@@ -1,18 +1,16 @@
-services:
-  chroma:
-    image: chromadb/chroma:latest
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./chroma_data:/chroma/chroma
-    environment:
-      ANONYMIZED_TELEMETRY: "FALSE"
-    restart: unless-stopped
+# Chroma is the existing container 7d05f569999b
+# (4heading-parsing-and-semanticchunking-chroma-1) on localhost:8000.
+# Do not start another Chroma here — port 8000 is already taken.
 
+services:
   mongo:
     image: mongo:7
+    container_name: hindubot-mongo
     ports:
       - "27017:27017"
     volumes:
-      - ./mongo_data:/data/db
+      - hindubot_mongo_data:/data/db
     restart: unless-stopped
+
+volumes:
+  hindubot_mongo_data:

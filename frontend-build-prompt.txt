@@ -49,6 +49,110 @@ Do NOT download the whole PDF into JS memory unless using PDF.js; prefer iframe/
 File is large (~86MB) — rely on browser / Range streaming.
 
 ───────────────────────────────────────
+1c) DISCOVER — curated exam articles (Mongo `examarticles`)
+───────────────────────────────────────
+Auth required on these routes (same as other protected APIs):
+  Authorization: Bearer <app JWT>
+
+Storage model: one Mongo document per article in collection `examarticles`.
+Discover does NOT use a separate collection — it groups those docs by `section`.
+
+Valid section names (exact strings):
+  "Front Page", "National", "Regional", "Edit", "Op-Ed",
+  "Business", "Foreign", "Sports", "Science"
+
+Article object (shared):
+{
+  "id": "66f1…",
+  "title": "Clean headline",
+  "section": "National",
+  "examRelevance": "high",
+  "summary": "2–3 sentence exam summary",
+  "refinedBody": "Full curated body for students…",
+  "examTags": ["polity", "federalism"],
+  "pageNumber": 3,
+  "wordCount": 180,
+  "source": "D:\\…\\THE HINDU today.pdf",
+  "createdAt": "2026-08-15T…",
+  "updatedAt": "2026-08-15T…"
+}
+
+── A) GET /api/discover  ★ Discover home ──
+Purpose: list every section name (+ counts) AND include Front Page articles data
+so the Discover landing can render section chips + a Front Page feed without a
+second request.
+
+Success:
+{
+  "sections": [
+    { "section": "Front Page", "count": 0 },
+    { "section": "National", "count": 27 },
+    { "section": "Regional", "count": 2 },
+    { "section": "Edit", "count": 2 },
+    { "section": "Op-Ed", "count": 2 },
+    { "section": "Business", "count": 10 },
+    { "section": "Foreign", "count": 8 },
+    { "section": "Sports", "count": 4 },
+    { "section": "Science", "count": 1 }
+  ],
+  "frontPage": {
+    "section": "Front Page",
+    "count": 6,
+    "articles": [ /* Article objects */ ]
+  }
+}
+
+Notes:
+- `sections` is the catalog for nav/chips (name + count).
+- `frontPage.articles` is the home feed. If few/no docs have section "Front Page",
+  backend may fill this from page-1 high/medium leads so the landing is not empty.
+- Do NOT load all sections’ articles here — only Front Page feed + section names.
+
+Example:
+  const res = await fetch(`${import.meta.env.VITE_API_URL}/api/discover`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const { sections, frontPage } = await res.json();
+  // sections → chip list; frontPage.articles → home article list
+
+── B) GET /api/discover/section/:section  ★ On-demand section ──
+Purpose: when user taps a section chip, fetch ALL articles for that section only.
+
+Examples:
+  GET /api/discover/section/National
+  GET /api/discover/section/Business
+  GET /api/discover/section/Front%20Page   // encode spaces
+
+Success:
+{
+  "section": "National",
+  "count": 27,
+  "articles": [ /* Article objects for that section only */ ]
+}
+
+Invalid section name → 400 with error message listing allowed sections.
+
+Example:
+  async function loadSection(sectionName) {
+    const path = `/api/discover/section/${encodeURIComponent(sectionName)}`;
+    const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
+    return res.json(); // { section, count, articles }
+  }
+
+── C) GET /api/exam/articles/:id  (optional detail) ──
+Single article by id (full fields including refinedBody).
+  → { "article": { …Article… } }
+
+Discover UI suggested flow:
+1) Open Discover → GET /api/discover
+2) Show section chips from `sections` + Front Page list from `frontPage.articles`
+3) On chip click → GET /api/discover/section/:section → replace list with that section’s articles
+4) On article open → show summary + refinedBody (from list payload or GET by id)
+
+───────────────────────────────────────
 2) POST /api/query/stream  ★ PRIMARY — use this for Ask
 ───────────────────────────────────────
 Headers: Content-Type: application/json

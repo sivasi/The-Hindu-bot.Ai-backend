@@ -7,6 +7,8 @@
     "chroma:up": "docker compose up -d",
     "chroma:down": "docker compose down",
     "ingest": "node ingest.js",
+    "ingest:lexical": "node ingest-lexical.js",
+    "ingest:exam": "node ingestExam.js",
     "query": "node query.js",
     "start": "node server.js",
     "dev": "node --watch server.js",

@@ -1,5 +1,5 @@
 # Google Sign-In — Option A (GIS ID token). NO backend redirect URI.
-# Google rejects IP redirects like http://34.93.159.106:30001/...
+# Google rejects IP redirects like http://34.100.175.180:30001/...
 #
 # ═══════════════════════════════════════════════════════════
 # Google Cloud Console → APIs & Services → Credentials
@@ -17,7 +17,7 @@
 #   http://localhost:5173
 #
 # DO NOT add:
-#   http://34.93.159.106:30001/api/auth/google/callback   ← invalid (IP)
+#   http://34.100.175.180:30001/api/auth/google/callback   ← invalid (IP)
 #
 # ═══════════════════════════════════════════════════════════
 # Frontend flow

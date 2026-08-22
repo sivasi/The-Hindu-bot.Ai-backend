@@ -1,5 +1,5 @@
 import { VertexAIEmbeddings, ChatVertexAI } from "@langchain/google-vertexai";
-import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
 import { createStuffDocumentsChain } from "@langchain/classic/chains/combine_documents";
 
 import {
@@ -12,7 +12,12 @@ import {
   DEFAULT_RETRIEVER_K,
   TURBO_RETRIEVER_K,
 } from "../config.js";
-import { openVectorStore } from "./chroma.js";
+import { getDocumentsByFilter, openVectorStore } from "./chroma.js";
+import { parsePageFilter } from "./selfQuery.js";
+import { decomposeQuestion, dedupeDocuments } from "./queryDecomposition.js";
+import { generateHydePassage } from "./hyde.js";
+import { hybridRetrieve } from "./hybrid.js";
+import { logger } from "./logger.js";
 
 let readyPromise = null;
 let vectorStore = null;
@@ -27,7 +32,14 @@ export const MODES = {
 const CHAT_AGENT_PREAMBLE = `You are a helpful chat agent for a newspaper archive Q&A assistant.
 Continue the conversation naturally like ChatGPT/Gemini: resolve follow-ups, pronouns, and references using the prior user questions when present.
 Answer ONLY using the provided retrieved context below. Do not invent facts outside that context.
+Each chunk is labeled with its page number and section. If the user asked about a specific page or section, those chunks are already filtered — summarize the article text. Do not refuse just because the body does not repeat the page or section.
+If the question has more than one topic, answer each topic from the retrieved context.
+If two topics are unrelated, say that clearly, then still summarise what the archive has on each topic. Do not omit a retrieved person or event just because they are not in the same article as the other topic.
 If the context is insufficient, say what is missing clearly.`;
+
+const DOCUMENT_PROMPT = PromptTemplate.fromTemplate(
+  "page {pageNumber} | section {section}\n{page_content}"
+);
 
 const NORMAL_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
 
@@ -253,14 +265,87 @@ function modeConfig(answerMode) {
   };
 }
 
-function buildLlm({ temperature, maxOutputTokens }) {
+function buildLlm({ temperature, maxOutputTokens, ...overrides } = {}) {
   return new ChatVertexAI({
     model: getChatModel(),
     temperature,
     maxOutputTokens,
     location: getChatLocation(),
     authOptions: getVertexAuth(),
+    ...overrides,
   });
+}
+
+async function retrieveForQuery(topic, llm, topK) {
+  const search = typeof topic === "string" ? topic : topic.search;
+  const vague = Boolean(topic?.vague);
+  const parsed = parsePageFilter(search);
+  let retrieveMode = "similarity";
+  let docs;
+  let hydePassage = "";
+
+  if (parsed.whole && parsed.filter) {
+    retrieveMode = "get";
+    docs = await getDocumentsByFilter(parsed.filter);
+    if (vague) {
+      console.log("[hyde] skipped: whole page/section uses get(), not embeddings");
+    }
+    console.log(
+      `[retrieve] get() ${docs.length} chunks for filter ${JSON.stringify(parsed.filter)}`
+    );
+  } else {
+    if (parsed.whole && !parsed.filter) {
+      console.warn(
+        '[self-query] "whole" ignored: add a page or section so get() is bounded'
+      );
+    }
+    let embedText = parsed.query;
+    if (vague) {
+      console.log(`[hyde] vague search → generate hypothetical chunk for "${parsed.query}"`);
+      hydePassage = await generateHydePassage(parsed.query, llm);
+      if (hydePassage) {
+        embedText = hydePassage;
+        retrieveMode = "hyde";
+      } else {
+        console.log("[hyde] no passage; embedding rewritten search instead");
+      }
+    }
+    const usedHyde = retrieveMode === "hyde";
+    const retrieved = await hybridRetrieve({
+      vectorStore,
+      semanticQuery: embedText,
+      lexicalQuery: parsed.query,
+      k: topK,
+      filter: parsed.filter,
+    });
+    docs = retrieved.docs;
+    retrieveMode = usedHyde
+      ? retrieved.lexicalUsed
+        ? "hyde+hybrid"
+        : "hyde"
+      : retrieved.lexicalUsed
+        ? "hybrid"
+        : "similarity";
+    if (retrieveMode === "hyde+hybrid") {
+      console.log(
+        `[retrieve] hyde+hybrid k=${topK} → ${docs.length} chunks (semantic=hypothetical chunk, lexical="${parsed.query}")`
+      );
+    } else if (retrieveMode === "hyde") {
+      console.log(
+        `[retrieve] hyde k=${topK} → ${docs.length} chunks (cosine only)`
+      );
+    } else if (retrieveMode === "hybrid") {
+      console.log(
+        `[retrieve] hybrid k=${topK} → ${docs.length} chunks for "${parsed.query}"`
+      );
+    } else {
+      console.log(
+        `[retrieve] similarity k=${topK} → ${docs.length} chunks for "${parsed.query}"`
+      );
+    }
+  }
+
+  return { docs, parsed, retrieveMode, hydePassage };
 }
 
 function resolveRequest({ question, k, mode, turbo }) {
@@ -335,9 +420,36 @@ export async function askQuestion({
 
   await ensureReady();
 
-  // Embed the combined prior+current questions for similarity search.
-  const retriever = vectorStore.asRetriever({ k: topK });
-  const retrievedDocs = await retriever.invoke(retrievalQuery);
+  const decomposer = buildLlm({
+    temperature: 0,
+    maxOutputTokens: 1024,
+    thinkingBudget: 0,
+  });
+  const hydeLlm = buildLlm({
+    temperature: 0.2,
+    maxOutputTokens: 1024,
+    thinkingBudget: 0,
+  });
+  const topics = await decomposeQuestion(retrievalQuery, decomposer);
+  logger.info("rag", "decomposed question", {
+    question: q.slice(0, 240),
+    topK,
+    mode: answerMode,
+    topics: topics.map((t) => ({
+      search: t.search,
+      vague: Boolean(t.vague),
+    })),
+  });
+  const retrievals = await Promise.all(
+    topics.map((topic) => retrieveForQuery(topic, hydeLlm, topK))
+  );
+  const retrieved = retrievals.flatMap((item) => item.docs);
+  const retrievedDocs = dedupeDocuments(retrieved);
+  if (retrieved.length !== retrievedDocs.length) {
+    console.log(
+      `[query-decomposition] merged ${retrieved.length} → ${retrievedDocs.length} unique chunks`
+    );
+  }
   const sources = retrievedDocs.map(parseStoredChunk);
 
   await emit({
@@ -359,7 +471,11 @@ export async function askQuestion({
     ["human", "{input}"],
   ]);
 
-  const combineDocsChain = await createStuffDocumentsChain({ llm, prompt });
+  const combineDocsChain = await createStuffDocumentsChain({
+    llm,
+    prompt,
+    documentPrompt: DOCUMENT_PROMPT,
+  });
 
   let answer = "";
   if (cfg.streamAnswer && answerMode === MODES.TURBO_RESEARCH) {
@@ -412,6 +528,14 @@ export async function askQuestion({
       retrievalQueryPreview: retrievalQuery.slice(0, 240),
     },
   };
+
+  logger.info("rag", "answer ready", {
+    mode: answerMode,
+    k: topK,
+    sources: sources.length,
+    retrieveModes: retrievals.map((item) => item.retrieveMode),
+    answerChars: answer.length,
+  });
 
   await emit({ type: "result", ...result });
   await emit({ type: "done" });

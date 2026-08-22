@@ -7,7 +7,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps
 
 # App source + PDF + ingest progress (needed for /api/health + /api/manual)
-COPY config.js server.js chunkText.js layoutArticles.js ingest.js query.js ./
+COPY config.js server.js chunkText.js layoutArticles.js ingest.js ingest-lexical.js ingestExam.js query.js ./
 COPY services ./services
 COPY middleware ./middleware
 COPY models ./models

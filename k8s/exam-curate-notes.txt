@@ -1,0 +1,28 @@
+# Exam-prep newspaper curation (The Hindu section names)
+#
+# Sections (exact The Hindu Today's Paper labels):
+#   Front Page, National, Regional, Edit, Op-Ed, Business, Foreign, Sports, Science
+#
+# Storage: MongoDB collection `examarticles` (one document per article).
+#
+# 1) PDF default:
+#    data/THE HINDU today.pdf
+#
+# 2) docker compose up -d mongo
+# 3) npm run ingest:exam
+#    One LLM call per PDF page (default: gemini-3.5-flash @ global).
+#    Override: EXAM_CHAT_MODEL / EXAM_CHAT_LOCATION
+#    Resume: EXAM_RESUME=1 EXAM_START_PAGE=14
+#
+# Discover APIs:
+#   GET /api/discover
+#     → { sections: [{ section, count }], frontPage: { section, count, articles } }
+#   GET /api/discover/section/National
+#     → { section, count, articles }   (encode spaces: Front%20Page)
+#   GET /api/exam/articles/:id
+#     → single article detail
+#
+# Sync local examarticles → GKE Mongo:
+#   kubectl port-forward -n default svc/mongo 27018:27017
+#   node scripts/syncExamArticlesToCloud.js
+#   (CLOUD_MONGODB_URI defaults to mongodb://127.0.0.1:27018/rag_users)

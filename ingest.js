@@ -473,6 +473,8 @@ async function main() {
   });
 
   await indexPdfIntoChroma(embeddings);
+  const { runLexicalIngest } = await import("./ingest-lexical.js");
+  await runLexicalIngest();
   console.log('\nNext: node query.js "your question"');
 }
 

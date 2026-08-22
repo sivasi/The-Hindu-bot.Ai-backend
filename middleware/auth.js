@@ -1,5 +1,6 @@
 import { verifyAppJwt } from "../services/auth.js";
 import { AUTH_REQUIRED } from "../config.js";
+import { setLogContext } from "../services/logger.js";
 
 function extractBearer(req) {
   const header = req.headers.authorization || "";
@@ -29,6 +30,7 @@ export function requireAuth(req, res, next) {
 
   try {
     req.user = verifyAppJwt(token);
+    setLogContext({ userId: req.user?.id || req.user?.sub || null });
     return next();
   } catch (err) {
     return res.status(err?.status || 401).json({
