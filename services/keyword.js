@@ -336,6 +336,25 @@ export function buildInvertedIndex(docs) {
   };
 }
 
+/**
+ * Drop df/postings for tokens in ≥ `ratio` of chunks.
+ * Unseen and common both mean "do not BM25-fetch".
+ */
+export function pruneToRareTokens(index, ratio) {
+  const n = index?.n || 0;
+  if (!n || !(ratio > 0)) return index;
+  const df = new Map();
+  const postings = new Map();
+  for (const [token, count] of index.df || []) {
+    if (count / n < ratio) {
+      df.set(token, count);
+      const list = index.postings.get(token);
+      if (list) postings.set(token, list);
+    }
+  }
+  return { ...index, df, postings };
+}
+
 /** BM25 over inverted postings only — not every chunk. */
 export function keywordSearchFromIndex(index, query, k, filter) {
   const queryTokens = lexicalQueryTokens(query);

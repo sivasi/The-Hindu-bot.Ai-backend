@@ -135,12 +135,13 @@ export function splitByMaxWords(text, maxWords, overlapWords) {
 
 /**
  * Format a stored chunk as:
+ *   date - {YYYY-MM-DD}   (optional)
  *   heading - {title}
  *   chunk {i}/{n}
  *
  *   {body}
  */
-export function formatChunk(heading, body, chunkIndex, chunkTotal) {
+export function formatChunk(heading, body, chunkIndex, chunkTotal, date) {
   const h = String(heading || "").trim() || "(untitled)";
   let b = String(body || "").trim();
   // Strip a bare title prefix if present so it isn't duplicated under the schema lines.
@@ -151,7 +152,11 @@ export function formatChunk(heading, body, chunkIndex, chunkTotal) {
 
   const i = Math.max(1, Number(chunkIndex) || 1);
   const n = Math.max(i, Number(chunkTotal) || i);
-  const header = `heading - ${h}\nchunk ${i}/${n}`;
+  const lines = [];
+  if (date) lines.push(`date - ${date}`);
+  lines.push(`heading - ${h}`);
+  lines.push(`chunk ${i}/${n}`);
+  const header = lines.join("\n");
   return b ? `${header}\n\n${b}` : header;
 }
 

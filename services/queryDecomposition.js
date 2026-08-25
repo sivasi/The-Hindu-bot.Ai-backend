@@ -1,10 +1,13 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { MAX_DECOMPOSED_QUERIES } from "../config.js";
+import { CALENDAR_START, MAX_DECOMPOSED_QUERIES } from "../config.js";
+import { emptyFilters } from "./selfQuery.js";
 import { logger } from "./logger.js";
 
-const DECOMPOSE_SYSTEM = `You prepare newspaper-archive vector-search queries.
+const ARCHIVE_YEAR = String(CALENDAR_START).slice(0, 4) || "2026";
 
-The index stores headline-style chunks (Title Case names, newsroom wording). Rewrite for embedding cosine similarity, not for chatting with a user.
+const DECOMPOSE_SYSTEM = `You prepare newspaper-archive retrieval.
+
+The archive is dated newspaper issues (metadata: date YYYY-MM-DD, pageNumber, section). Rewrite for embedding search, and extract Chroma filters from the USER QUESTION — not from your rewritten search.
 
 Step 0 — Resolve follow-ups from conversation summary
 - The human message may include a conversation summary plus the current user message.
@@ -13,62 +16,61 @@ Step 0 — Resolve follow-ups from conversation summary
 - If there is no summary, or the current message is already self-contained, keep its meaning.
 - Put that standalone question in \`standalone\`. This is what the answer model will see.
 
-Step 1 — Decompose
+Step 1 — Extract filters from the standalone question
+- date: one calendar day as YYYY-MM-DD, else null.
+- dateFrom / dateTo: inclusive range as YYYY-MM-DD, else null. Use a range only when the user asked for more than one day (from/to, a whole month). If they named one day, set date and leave dateFrom/dateTo null.
+- Indian DMY (17-01-2026, 17/01/2026), "17 jan 2026", "17 January 2026", "Jan 17, 2026" all become ISO.
+- If the year is omitted, assume ${ARCHIVE_YEAR}.
+- pageNumber: integer from "page 1", "p.1", "on the page 1". Else null.
+- section: one of news, sport, business, states, world, editorial, opinion, national, international, delhi, telangana, faith, science, education, investor. Only if they named a newspaper section. Else null.
+- whole: true only if they asked to summarize/list the entire page or section (not a specific person or event on that page).
+- Do not invent dates, pages, or sections that are not in the question.
+
+Step 2 — Decompose topics
 - Split \`standalone\` (not the raw follow-up) if it asks about two or more unrelated topics; emit one object per topic.
 - If it is already a single topic, emit exactly one object.
-- Keep page / section / "whole" hints on the query they belong to. Do not rewrite those filter phrases.
 - Do not invent topics or add extra questions.
 
-Step 2 — Rewrite each object's \`search\` for retrieval
-- Proper names (people, places, organisations, events): treat them as names. Write them in Title Case (wayanad → Wayanad, modi → Modi).
-- Replace slang, abbreviations, and vague words with standard news/industry terms (jobs → employment, electricity/power company → power sector, "what happened" → the concrete event noun).
-- If a word is misspelled, made-up, or not a dictionary term, infer what the user means and replace it with the newsroom word (earthquack → earthquake, collison → collision). Do not keep the broken spelling in \`search\`.
-- If the user describes an event in plain or informal words, even when each word is in the dictionary, replace the whole phrase with the one formal news/industry noun (Man shooting the animal → hunting; building falling down → collapse). Do not leave those descriptive phrases in \`search\`.
-- Prefer a short headline-like noun phrase over a full question. Drop "what was", "what did … say", "tell me about".
-- Keep the original meaning. Keep the topic the same.
+Step 3 — Rewrite each object's \`search\` for retrieval
+- This is the embedding/BM25 text ONLY. Strip date, page, section, and "whole/summarize the page" phrases — those belong in filters.
+- Proper names: Title Case (modi → Modi, pm → Prime Minister).
+- Replace slang and vague words with newsroom terms.
+- Fix spelling (earthquack → earthquake).
+- Prefer a short headline-like noun phrase. Drop "what was", "what did … say".
 
-Step 3 — Flag vague searches
-- Judge the rewritten \`search\`, not the original question.
-- "vague": false only when the topic name is strict and searchable: a specific event noun like a particular ind v Aus cricket match, a named-company case study , a specific place, a named person/organisation, or a narrow subject (farm loans, power sector employment) — even if the journal title is missing. The word "paper" or "study" alone does not make it vague.
-- "vague": true when the topic is only an umbrella/category that could be many events (sports, general football match, finance, Bank finance, political news, election story, international news, war , calamity, accident, climate event, crisis) or when almost nothing concrete remains ("that paper", "public health paper").
-- Do not invent a specific disaster type in \`search\` if the user only said "natural disaster". Leave the umbrella term and set "vague": true so HyDE can run.
-- Filter-only queries such as "summarize the whole page 7?" are never vague.
+Step 4 — Flag vague searches
+- Judge the rewritten \`search\` plus filters.
+- vague: false when the topic is a named person, place, organisation, event, or narrow subject — even if short ("Prime Minister statements").
+- vague: false for filter-only questions ("summarize the whole page 7").
+- vague: true only for an umbrella category with no specific entity (sports, war, climate event).
 
-Return ONLY JSON of the form {"standalone":"...","queries":[{"search":"...","vague":false}]} with no markdown.
+Return ONLY JSON (no markdown):
+{"standalone":"...","filters":{"date":null,"dateFrom":null,"dateTo":null,"pageNumber":null,"section":null,"whole":false},"queries":[{"search":"...","vague":false}]}
 
 Examples:
 Conversation summary: (none)
+User: what does PM says on the page 1 on date 17 jan 2026
+JSON: {"standalone":"What did the Prime Minister say on page 1 on 17 January 2026?","filters":{"date":"2026-01-17","dateFrom":null,"dateTo":null,"pageNumber":1,"section":null,"whole":false},"queries":[{"search":"Prime Minister statements","vague":false}]}
+
+Conversation summary: (none)
+User: summarize the whole page 7 on 2 February 2026
+JSON: {"standalone":"Summarize the whole page 7 on 2 February 2026.","filters":{"date":"2026-02-02","dateFrom":null,"dateTo":null,"pageNumber":7,"section":null,"whole":true},"queries":[{"search":"page 7","vague":false}]}
+
+Conversation summary: (none)
+User: from 2026-01-15 to 2026-02-02 Wayanad landslide
+JSON: {"standalone":"What was reported about the Wayanad landslide from 15 January 2026 to 2 February 2026?","filters":{"date":null,"dateFrom":"2026-01-15","dateTo":"2026-02-02","pageNumber":null,"section":null,"whole":false},"queries":[{"search":"Wayanad landslide","vague":false}]}
+
+Conversation summary: (none)
 User: What was the employment growth in the power sector, and what did the ground report say about the Wayanad landslide?
-JSON: {"standalone":"What was the employment growth in the power sector, and what did the ground report say about the Wayanad landslide?","queries":[{"search":"Power sector employment growth","vague":false},{"search":"Wayanad landslide ground report","vague":false}]}
+JSON: {"standalone":"What was the employment growth in the power sector, and what did the ground report say about the Wayanad landslide?","filters":{"date":null,"dateFrom":null,"dateTo":null,"pageNumber":null,"section":null,"whole":false},"queries":[{"search":"Power sector employment growth","vague":false},{"search":"Wayanad landslide ground report","vague":false}]}
 
 Conversation summary: User asked about Manipur ethnic violence; assistant summarised the ground report.
 User: what did the court say?
-JSON: {"standalone":"What did the court say about the Manipur ethnic violence?","queries":[{"search":"Manipur ethnic violence court","vague":false}]}
+JSON: {"standalone":"What did the court say about the Manipur ethnic violence?","filters":{"date":null,"dateFrom":null,"dateTo":null,"pageNumber":null,"section":null,"whole":false},"queries":[{"search":"Manipur ethnic violence court","vague":false}]}
 
 Conversation summary: (none)
-User: jobs at the electricity company
-JSON: {"standalone":"What is employment like at the electricity company?","queries":[{"search":"Power sector employment","vague":false}]}
-
-User: A man was shooting the animal in Kaziranga
-JSON: {"standalone":"What happened when a man was shooting the animal in Kaziranga?","queries":[{"search":"Kaziranga hunting","vague":false}]}
-
-User: Why did the building falling down happen in Delhi?
-JSON: {"standalone":"Why did the building collapse in Delhi?","queries":[{"search":"Delhi building collapse","vague":false}]}
-
-User: What did that 2019 economics paper say about farm loans?
-JSON: {"standalone":"What did that 2019 economics paper say about farm loans?","queries":[{"search":"2019 economics paper farm loans","vague":false}]}
-
-User: What did that paper say about flooding after the Assam rains?
-JSON: {"standalone":"What did that paper say about flooding after the Assam rains?","queries":[{"search":"Assam flood paper","vague":false}]}
-
-User: What did that paper say about natural disasters?
-JSON: {"standalone":"What did that paper say about natural disasters?","queries":[{"search":"natural disaster paper","vague":true}]}
-
-User: What did that paper say?
-JSON: {"standalone":"What did that paper say?","queries":[{"search":"that paper","vague":true}]}
-
 User: summarize the whole page 7?
-JSON: {"standalone":"summarize the whole page 7?","queries":[{"search":"summarize the whole page 7?","vague":false}]}`;
+JSON: {"standalone":"summarize the whole page 7?","filters":{"date":null,"dateFrom":null,"dateTo":null,"pageNumber":7,"section":null,"whole":true},"queries":[{"search":"page 7","vague":false}]}`;
 
 function extractJsonObject(text) {
   const raw = String(text || "").trim();
@@ -122,6 +124,24 @@ function normalizeQueries(queries, original) {
   return topics.length ? topics : fallbackTopics(original);
 }
 
+function filtersFromLlmJson(parsed) {
+  if (parsed?.filters && typeof parsed.filters === "object") {
+    return parsed.filters;
+  }
+  const first = Array.isArray(parsed?.queries) ? parsed.queries[0] : null;
+  if (first && typeof first === "object") {
+    return {
+      date: first.date,
+      dateFrom: first.dateFrom,
+      dateTo: first.dateTo,
+      pageNumber: first.pageNumber,
+      section: first.section,
+      whole: first.whole,
+    };
+  }
+  return emptyFilters();
+}
+
 function messageText(raw) {
   if (typeof raw === "string") return raw;
   const content = raw?.content;
@@ -154,16 +174,21 @@ function buildHumanMessage(question, conversationSummary) {
 /**
  * Resolve follow-ups from conversation summary, then split/rewrite for retrieval.
  * Vague topics are flagged so retrieval can run HyDE instead of embedding `search`.
- * @returns {{ topics: Array<{search: string, vague: boolean}>, standalone: string }}
+ * @returns {{ topics: Array<{search: string, vague: boolean}>, standalone: string, filters: object }}
  */
 export async function decomposeQuestion(question, llm, { conversationSummary } = {}) {
   const original = String(question || "").trim();
   if (!original) {
-    return { topics: fallbackTopics(original), standalone: original };
+    return {
+      topics: fallbackTopics(original),
+      standalone: original,
+      filters: emptyFilters(),
+    };
   }
 
   let topics = fallbackTopics(original);
   let standalone = original;
+  let filters = emptyFilters();
   try {
     const human = buildHumanMessage(original, conversationSummary);
     logger.info(
@@ -191,6 +216,7 @@ export async function decomposeQuestion(question, llm, { conversationSummary } =
         topics = normalizeQueries(parsed.queries, original);
         const resolved = cleanText(parsed.standalone);
         if (resolved) standalone = resolved;
+        filters = filtersFromLlmJson(parsed);
       } else {
         console.warn("[query-decomposition] invalid LLM JSON; using original");
       }
@@ -206,14 +232,14 @@ export async function decomposeQuestion(question, llm, { conversationSummary } =
     console.log(`[query-decomposition] standalone: ${standalone}`);
   }
   logTopics(topics);
-  return { topics, standalone };
+  return { topics, standalone, filters };
 }
 
 export function documentKey(doc) {
   if (doc?.id) return `id:${doc.id}`;
   const meta = doc?.metadata || {};
   if (meta.pageNumber != null && meta.heading && meta.chunkIndex != null) {
-    return `${meta.pageNumber}|${meta.heading}|${meta.chunkIndex}`;
+    return `${meta.date || ""}|${meta.pageNumber}|${meta.heading}|${meta.chunkIndex}`;
   }
   return String(doc?.pageContent || "").slice(0, 240);
 }

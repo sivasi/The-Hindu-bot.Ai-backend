@@ -6,6 +6,7 @@ const sourceSchema = new mongoose.Schema(
     chunkIndex: Number,
     chunkTotal: Number,
     pageNumber: Number,
+    date: String,
     section: String,
     excerpt: String,
   },

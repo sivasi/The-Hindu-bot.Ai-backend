@@ -9,6 +9,7 @@ import {
   CHROMA_COLLECTION,
   getChromaClientOptions,
 } from "../config.js";
+import { presentFilesComplete, progressSummary, dateParts } from "./ingestCalendar.js";
 
 export async function readProgress() {
   try {
@@ -21,10 +22,8 @@ export async function readProgress() {
 
 export async function getHealth() {
   const client = new ChromaClient(getChromaClientOptions());
-  let chromaOk = false;
   try {
     await client.heartbeat();
-    chromaOk = true;
   } catch {
     return {
       ok: false,
@@ -38,34 +37,16 @@ export async function getHealth() {
   }
 
   const progress = await readProgress();
-  if (!progress) {
-    return {
-      ok: false,
-      chromaOk,
-      indexReady: false,
-      vectorCount: 0,
-      collection: CHROMA_COLLECTION,
-      chromaUrl: CHROMA_URL,
-      error: "No ingest progress. Run: node ingest.js",
-    };
-  }
-
-  if (!progress.complete) {
-    return {
-      ok: false,
-      chromaOk,
-      indexReady: false,
-      vectorCount: progress.vectorCount || 0,
-      collection: CHROMA_COLLECTION,
-      chromaUrl: CHROMA_URL,
-      progress: {
-        nextPage: progress.nextPage,
-        totalPages: progress.totalPages,
-        complete: false,
-      },
-      error: `Ingest incomplete (page ${progress.nextPage}/${progress.totalPages})`,
-    };
-  }
+  const isCalendar = Boolean(progress?.version === 2 && progress?.files);
+  const ingestComplete = isCalendar
+    ? presentFilesComplete(progress)
+    : Boolean(progress?.complete);
+  const summary = isCalendar ? progressSummary(progress) : null;
+  const inProgress = isCalendar
+    ? Object.values(progress.files || {}).find(
+        (entry) => entry.status === "in_progress"
+      )
+    : null;
 
   let vectorCount = 0;
   try {
@@ -77,7 +58,7 @@ export async function getHealth() {
   } catch {
     return {
       ok: false,
-      chromaOk,
+      chromaOk: true,
       indexReady: false,
       vectorCount: 0,
       collection: CHROMA_COLLECTION,
@@ -89,7 +70,7 @@ export async function getHealth() {
   if (!vectorCount) {
     return {
       ok: false,
-      chromaOk,
+      chromaOk: true,
       indexReady: false,
       vectorCount: 0,
       collection: CHROMA_COLLECTION,
@@ -98,15 +79,36 @@ export async function getHealth() {
     };
   }
 
+  // Shared newspapers_2026 collection is ready even without this repo's progress file.
+  let progressPayload = null;
+  if (isCalendar && !ingestComplete) {
+    progressPayload = {
+      date: inProgress?.date || null,
+      nextPage: inProgress?.nextPage || null,
+      totalPages: inProgress?.totalPages || null,
+      pending: summary?.counts?.pending,
+      missing: summary?.counts?.missing,
+      complete: false,
+    };
+  } else if (!isCalendar && progress && progress.complete === false) {
+    progressPayload = {
+      nextPage: progress.nextPage,
+      totalPages: progress.totalPages,
+      complete: false,
+    };
+  }
+
   return {
     ok: true,
-    chromaOk,
+    chromaOk: true,
     indexReady: true,
     vectorCount,
     collection: CHROMA_COLLECTION,
     chromaUrl: CHROMA_URL,
-    chunking: progress.chunking || null,
-    source: progress.source || null,
+    chunking: progress?.chunking || null,
+    source: progress?.sourceDir || progress?.source || null,
+    ingestComplete,
+    progress: progressPayload,
   };
 }
 
@@ -129,6 +131,10 @@ export async function openVectorStore(embeddings) {
 
 let allDocsCache = null;
 
+export function clearDocumentsCache() {
+  allDocsCache = null;
+}
+
 function rowsToDocuments(result) {
   return result.rows().map(
     (row) =>
@@ -142,6 +148,9 @@ function rowsToDocuments(result) {
 
 function sortByLayout(docs) {
   return [...docs].sort((a, b) => {
+    const date =
+      (Number(a.metadata.dateInt) || 0) - (Number(b.metadata.dateInt) || 0);
+    if (date) return date;
     const page =
       (Number(a.metadata.pageNumber) || 0) - (Number(b.metadata.pageNumber) || 0);
     if (page) return page;
@@ -155,7 +164,7 @@ function sortByLayout(docs) {
   });
 }
 
-/** Match Chroma where clauses produced by parsePageFilter ($eq / $in / $and). */
+/** Match Chroma where clauses produced by LLM filters ($eq / $in / $and). */
 export function matchesChromaWhere(metadata, filter) {
   if (!filter) return true;
   if (filter.$and) {
@@ -171,6 +180,10 @@ export function matchesChromaWhere(metadata, filter) {
     if (cond && typeof cond === "object" && !Array.isArray(cond)) {
       if ("$eq" in cond && value !== cond.$eq) return false;
       if ("$in" in cond && !cond.$in.includes(value)) return false;
+      if ("$gte" in cond && !(value >= cond.$gte)) return false;
+      if ("$lte" in cond && !(value <= cond.$lte)) return false;
+      if ("$gt" in cond && !(value > cond.$gt)) return false;
+      if ("$lt" in cond && !(value < cond.$lt)) return false;
     } else if (value !== cond) {
       return false;
     }
@@ -184,11 +197,23 @@ async function fetchCollectionDocuments(filter) {
     name: CHROMA_COLLECTION,
     embeddingFunction: null,
   });
-  const result = await collection.get({
-    ...(filter ? { where: filter } : {}),
-    include: ["documents", "metadatas"],
-  });
-  return rowsToDocuments(result);
+  const pageSize = 2000;
+  const docs = [];
+  let offset = 0;
+  while (true) {
+    const result = await collection.get({
+      ...(filter ? { where: filter } : {}),
+      include: ["documents", "metadatas"],
+      limit: pageSize,
+      offset,
+    });
+    const batch = rowsToDocuments(result);
+    if (!batch.length) break;
+    docs.push(...batch);
+    offset += batch.length;
+    if (batch.length < pageSize) break;
+  }
+  return docs;
 }
 
 /** Fetch stored text for a small set of chunk ids (BM25 hits without pageContent). */
@@ -239,12 +264,30 @@ export async function fillPageContent(docs) {
   });
 }
 
+/** Chroma where for one day or an inclusive dateInt range. */
+export function dateRangeWhere({ date, from, to } = {}) {
+  if (date) return { date: { $eq: date } };
+  const clauses = [];
+  if (from) clauses.push({ dateInt: { $gte: dateParts(from).dateInt } });
+  if (to) clauses.push({ dateInt: { $lte: dateParts(to).dateInt } });
+  if (!clauses.length) return undefined;
+  if (clauses.length === 1) return clauses[0];
+  return { $and: clauses };
+}
+
 /** All chunks in the collection (cached after first load). */
 export async function getAllDocuments() {
   if (!allDocsCache) {
     allDocsCache = await fetchCollectionDocuments();
   }
   return allDocsCache;
+}
+
+/** Chunks for BM25: full corpus, or the page/section subset. */
+export async function getLexicalCorpus(filter) {
+  const all = await getAllDocuments();
+  if (!filter) return all;
+  return all.filter((doc) => matchesChromaWhere(doc.metadata, filter));
 }
 
 /** Fetch every chunk matching a metadata filter (no similarity / top-k). */

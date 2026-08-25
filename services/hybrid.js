@@ -22,10 +22,12 @@ function clip(text, max = 80) {
 function chunkLabel(doc) {
   const meta = doc?.metadata || {};
   const heading = clip(meta.heading || "(untitled)");
+  const date = meta.date || "";
   const page = meta.pageNumber ?? "?";
   const chunk =
     meta.chunkIndex != null ? `${meta.chunkIndex}/${meta.chunkTotal || "?"}` : "?";
-  return `p${page} chunk ${chunk} | ${heading}`;
+  const when = date ? `${date} ` : "";
+  return `${when}p${page} chunk ${chunk} | ${heading}`;
 }
 
 function rankLabel(rank) {
@@ -98,7 +100,7 @@ function rrfFuse(rankedLists, k) {
 /**
  * Dense cosine always. BM25 only when a query token is rare in this
  * collection (df/N < 1% and df ≥ 1). The inverted index is loaded from
- * cache/lexical-index.json (built by ingest-lexical.js).
+ * hosted lexical-index.json (same container as RAG/8.2026-data, :8002).
  */
 export async function hybridRetrieve({
   vectorStore,

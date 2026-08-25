@@ -1,8 +1,6 @@
-const PAGE_RE = /\b(?:on\s+)?page(?:Number)?\s*[:=]?\s*(\d+)\b/i;
-const WHOLE_RE =
-  /\b(?:the\s+)?(?:whole|entire|full)(?:\s+(?:page|section))?\b|\ball\s+of\s+(?:the\s+)?(?:page)?\b/i;
+import { dateParts, isISODate } from "./ingestCalendar.js";
 
-const SECTIONS = [
+const SECTION_SET = new Set([
   "news",
   "sport",
   "sports",
@@ -19,14 +17,7 @@ const SECTIONS = [
   "science",
   "education",
   "investor",
-];
-
-const SECTION_NAMES = SECTIONS.join("|");
-// Require "section" so "the news about …" is not treated as section=news.
-const SECTION_RE = new RegExp(
-  String.raw`\b(?:in\s+(?:the\s+)?)?(${SECTION_NAMES})\s+section\b|\bsection\s*[:=]?\s*(${SECTION_NAMES})\b`,
-  "i"
-);
+]);
 
 function chromaSectionFilter(section) {
   const lower = String(section).trim().toLowerCase();
@@ -43,8 +34,16 @@ function chromaSectionFilter(section) {
   return { section: { $in: [...new Set(variants)] } };
 }
 
-function toChromaFilter({ pageNumber, section }) {
+function toChromaFilter({ pageNumber, section, date, dateFrom, dateTo }) {
   const clauses = [];
+  if (date) clauses.push({ date: { $eq: date } });
+  if (!date && (dateFrom || dateTo)) {
+    const range = [];
+    if (dateFrom) range.push({ dateInt: { $gte: dateParts(dateFrom).dateInt } });
+    if (dateTo) range.push({ dateInt: { $lte: dateParts(dateTo).dateInt } });
+    if (range.length === 1) clauses.push(range[0]);
+    else if (range.length === 2) clauses.push({ $and: range });
+  }
   if (pageNumber != null) clauses.push({ pageNumber: { $eq: pageNumber } });
   if (section) clauses.push(chromaSectionFilter(section));
   if (clauses.length === 0) return undefined;
@@ -52,50 +51,104 @@ function toChromaFilter({ pageNumber, section }) {
   return { $and: clauses };
 }
 
-/** Pull page / section filters out of the question, e.g. "business on page 5". */
-export function parsePageFilter(question) {
-  const original = String(question || "").trim();
-  let query = original;
-  let pageNumber = null;
-  let section = null;
-  let whole = false;
+export function emptyFilters() {
+  return {
+    date: null,
+    dateFrom: null,
+    dateTo: null,
+    pageNumber: null,
+    section: null,
+    whole: false,
+  };
+}
 
-  const pageMatch = query.match(PAGE_RE);
-  if (pageMatch) {
-    pageNumber = Number(pageMatch[1]);
-    query = query.replace(pageMatch[0], " ");
+function coerceIsoDate(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "null") return null;
+  return isISODate(text) ? text : null;
+}
+
+function coercePageNumber(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
+function coerceSection(value) {
+  const lower = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!lower || !SECTION_SET.has(lower)) return null;
+  return lower === "sports" ? "sport" : lower;
+}
+
+function coerceWhole(value) {
+  return value === true || value === "true";
+}
+
+/** Normalize LLM filter JSON. Dates must already be YYYY-MM-DD. */
+export function coerceMetadataFilters(raw) {
+  const empty = emptyFilters();
+  if (!raw || typeof raw !== "object") return empty;
+
+  const date = coerceIsoDate(raw.date);
+  let dateFrom = coerceIsoDate(raw.dateFrom);
+  let dateTo = coerceIsoDate(raw.dateTo);
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    [dateFrom, dateTo] = [dateTo, dateFrom];
+  }
+  if (dateFrom && dateTo && dateFrom === dateTo) {
+    return {
+      ...empty,
+      date: dateFrom,
+      pageNumber: coercePageNumber(raw.pageNumber),
+      section: coerceSection(raw.section),
+      whole: coerceWhole(raw.whole),
+    };
   }
 
-  const sectionMatch = query.match(SECTION_RE);
-  if (sectionMatch) {
-    section = (sectionMatch[1] || sectionMatch[2]).trim();
-    query = query.replace(sectionMatch[0], " ");
-  }
+  return {
+    date: date || null,
+    dateFrom: date ? null : dateFrom,
+    dateTo: date ? null : dateTo,
+    pageNumber: coercePageNumber(raw.pageNumber),
+    section: coerceSection(raw.section),
+    whole: coerceWhole(raw.whole),
+  };
+}
 
-  const wholeMatch = query.match(WHOLE_RE);
-  if (wholeMatch) {
-    whole = true;
-    query = query.replace(wholeMatch[0], " ");
-  }
-
-  query = query.replace(/\s+/g, " ").trim() || original;
-  const filter = toChromaFilter({ pageNumber, section });
-
+/**
+ * Filters come only from the decompose LLM. `search` is embedding / BM25 text.
+ */
+export function buildParsedQuery({ original, search, llmFilters } = {}) {
+  const question = String(original || "").trim();
+  const query = String(search || question).trim() || question;
+  const filters = coerceMetadataFilters(llmFilters);
+  const filter = toChromaFilter(filters);
+  const parsed = {
+    question,
+    query,
+    ...filters,
+    filter,
+  };
   console.log(
     "[self-query]",
     JSON.stringify(
       {
-        question: original,
-        searchQuery: query,
-        pageNumber,
-        section,
-        whole,
-        filter: filter || null,
+        source: "llm",
+        question: parsed.question,
+        searchQuery: parsed.query,
+        date: parsed.date,
+        dateFrom: parsed.dateFrom,
+        dateTo: parsed.dateTo,
+        pageNumber: parsed.pageNumber,
+        section: parsed.section,
+        whole: parsed.whole,
+        filter: parsed.filter || null,
       },
       null,
       2
     )
   );
-
-  return { query, pageNumber, section, whole, filter };
+  return parsed;
 }

@@ -23,6 +23,7 @@ function compactSources(sources) {
     chunkIndex: s?.chunkIndex ?? s?.metadata?.chunkIndex ?? null,
     chunkTotal: s?.chunkTotal ?? s?.metadata?.chunkTotal ?? null,
     pageNumber: s?.pageNumber ?? s?.metadata?.pageNumber ?? null,
+    date: s?.date || s?.metadata?.date || null,
     section: s?.section ?? s?.metadata?.section ?? null,
     excerpt: String(s?.excerpt || s?.pageContent || "").slice(0, 400),
   }));

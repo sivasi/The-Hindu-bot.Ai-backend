@@ -1,12 +1,26 @@
 import path from "path";
 
-export const PDF_PATH = path.join("data", "manual4.pdf");
+/** Folder of The-Hindu-DD-MM-YYYY.pdf issues (same as RAG/8.2026-data). */
+export const PDF_DIR = process.env.PDF_DIR || path.join("data", "pdf");
+export const CALENDAR_START = process.env.CALENDAR_START || "2026-01-01";
+/** Inclusive end date for a default `node ingest.js` run. */
+export const INGEST_UNTIL = process.env.INGEST_UNTIL || "2026-08-24";
+/**
+ * Present PDFs processed per `node ingest.js` run.
+ * 0 = no cap (ingest every due file through INGEST_UNTIL).
+ */
+export const INGEST_FILE_BATCH = Number(process.env.INGEST_FILE_BATCH || 0);
 export const PROGRESS_PATH = path.join("cache", "ingest.progress.json");
 export const EMBEDDING_MODEL = "text-embedding-005";
-/** Local default. Production sets CHROMA_URL to the cluster Chroma service. */
-export const CHROMA_URL = process.env.CHROMA_URL || "http://localhost:8000";
+/**
+ * Local default: same Chroma as RAG/8.2026-data (`rag-newspapers-chroma` :8001).
+ * Production may override CHROMA_URL to the cluster Chroma service.
+ */
+export const CHROMA_URL = process.env.CHROMA_URL || "http://localhost:8001";
+/** Legacy single-PDF collection — ingest never deletes or overwrites it. */
+export const LEGACY_CHROMA_COLLECTION = "manual4_pdf";
 export const CHROMA_COLLECTION =
-  process.env.CHROMA_COLLECTION || "manual4_pdf";
+  process.env.CHROMA_COLLECTION || "newspapers_2026";
 export const EXAM_PDF_PATH =
   process.env.EXAM_PDF_PATH || path.join("data", "THE HINDU today.pdf");
 export const EXAM_PROGRESS_PATH = path.join("cache", "exam-ingest.progress.json");
@@ -25,8 +39,10 @@ export const DEFAULT_RETRIEVER_K = Number(process.env.RETRIEVER_K) || 3;
 /** Retriever k when frontend sends turbo: true */
 export const TURBO_RETRIEVER_K = Number(process.env.TURBO_RETRIEVER_K) || 10;
 
-export const LEXICAL_INDEX_PATH = path.join("cache", "lexical-index.json");
-export const LEXICAL_INDEX_VERSION = 2;
+export const LEXICAL_INDEX_FILE = "lexical-index.json";
+export const LEXICAL_INDEX_URL =
+  process.env.LEXICAL_INDEX_URL || `http://localhost:8002/${LEXICAL_INDEX_FILE}`;
+export const LEXICAL_INDEX_VERSION = 3;
 /** Cap how many single-topic searches a decomposed question can spawn. */
 export const MAX_DECOMPOSED_QUERIES = 3;
 /** Rolling chat-memory size stored on ChatSession.summary. */
@@ -44,7 +60,7 @@ export const HYBRID_WEIGHT_EXP_K = 8;
 /** Lower than the textbook 60 so a strong semantic #1 beats weak dual-list mid ranks. */
 export const HYBRID_RRF_C = 10;
 /** BM25 runs only if a query token appears in fewer than this share of chunks. */
-export const LEXICAL_RARE_DF_RATIO = 0.01;
+export const LEXICAL_RARE_DF_RATIO = Number(process.env.LEXICAL_RARE_DF_RATIO || 0.01);
 
 /** Google OAuth 2.0 / OpenID (GIS) — no Passport, no sessions. */
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -126,4 +142,9 @@ export function getChromaClientOptions() {
     port: parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 8000,
     ssl: parsed.protocol === "https:",
   };
+}
+
+/** Origin of the lexical-index host (health checks). */
+export function getLexicalIndexOrigin() {
+  return new URL(LEXICAL_INDEX_URL).origin;
 }

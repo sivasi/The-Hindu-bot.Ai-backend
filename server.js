@@ -7,7 +7,7 @@ import cors from "cors";
 import {
   PORT,
   CORS_ORIGIN,
-  PDF_PATH,
+  EXAM_PDF_PATH,
   GOOGLE_CLIENT_ID,
   AUTH_REQUIRED,
 } from "./config.js";
@@ -19,6 +19,7 @@ import {
   flushLogs,
 } from "./services/logger.js";
 import { getHealth, readProgress } from "./services/chroma.js";
+import { isISODate, listPresentIssues, resolveIssuePdf } from "./services/ingestCalendar.js";
 import { askQuestion, warmRag } from "./services/rag.js";
 import {
   verifyGoogleIdToken,
@@ -55,8 +56,37 @@ import { AppLog } from "./models/AppLog.js";
 installConsoleCapture();
 
 const app = express();
-const PDF_ABS = path.resolve(PDF_PATH);
-const PDF_FILENAME = path.basename(PDF_ABS);
+const EXAM_PDF_ABS = path.resolve(EXAM_PDF_PATH);
+
+async function resolveManualPdf(dateQuery) {
+  const date = String(dateQuery || "").trim();
+  if (date) {
+    if (!isISODate(date)) {
+      const err = new Error("date must be YYYY-MM-DD");
+      err.status = 400;
+      throw err;
+    }
+    const issue = await resolveIssuePdf(date);
+    if (!issue) {
+      const err = new Error(`No newspaper PDF for ${date}`);
+      err.status = 404;
+      throw err;
+    }
+    return issue;
+  }
+
+  if (fs.existsSync(EXAM_PDF_ABS)) {
+    return {
+      path: EXAM_PDF_ABS,
+      date: null,
+      totalPages: null,
+      filename: path.basename(EXAM_PDF_ABS),
+    };
+  }
+  const err = new Error("PDF not found");
+  err.status = 404;
+  throw err;
+}
 
 app.use(
   cors({
@@ -131,6 +161,7 @@ app.get("/", (_req, res) => {
       "DELETE /api/chats/:id",
       "GET  /api/manual",
       "GET  /api/manual/info",
+      "GET  /api/archive",
       "GET  /api/discover",
       "GET  /api/discover/section/:section",
       "GET  /api/exam/sections",
@@ -386,48 +417,80 @@ app.get("/api/exam/articles/:id", requireAuth, async (req, res) => {
   }
 });
 
-/** JSON metadata for the archived PDF (for FE viewer chrome). */
-app.get("/api/manual/info", requireAuth, async (_req, res) => {
+/** Public catalog of dated newspaper issues. */
+app.get("/api/archive", async (_req, res) => {
   try {
-    if (!fs.existsSync(PDF_ABS)) {
-      return res.status(404).json({ error: "PDF not found", path: PDF_PATH });
-    }
-    const stat = fs.statSync(PDF_ABS);
-    const progress = await readProgress();
+    const catalog = await listPresentIssues();
     res.json({
-      url: "/api/manual",
-      filename: PDF_FILENAME,
-      sizeBytes: stat.size,
-      totalPages: progress?.totalPages ?? null,
-      source: progress?.source ?? PDF_PATH,
+      ok: true,
+      calendarStart: catalog.calendarStart,
+      calendarEnd: catalog.calendarEnd,
+      count: catalog.issues.length,
+      issues: catalog.issues,
     });
   } catch (err) {
-    res.status(500).json({ error: err?.message || "Failed to read PDF info" });
+    res.status(500).json({
+      ok: false,
+      error: err?.message || "Failed to list archive",
+    });
+  }
+});
+
+/** JSON metadata for the archived PDF (public). */
+app.get("/api/manual/info", async (req, res) => {
+  try {
+    const issue = await resolveManualPdf(req.query.date);
+    const stat = fs.statSync(issue.path);
+    const progress = await readProgress();
+    const totalPages = issue.date
+      ? progress?.files?.[issue.date]?.totalPages ?? issue.totalPages
+      : progress?.totalPages ?? issue.totalPages;
+    res.json({
+      url: issue.date ? `/api/manual?date=${issue.date}` : "/api/manual",
+      filename: issue.filename,
+      date: issue.date,
+      sizeBytes: stat.size,
+      totalPages: totalPages ?? null,
+      source: issue.filename,
+    });
+  } catch (err) {
+    const status = err?.status || 500;
+    res.status(status).json({
+      error: err?.message || "Failed to read PDF info",
+      ...(status === 404 ? { path: EXAM_PDF_PATH } : {}),
+    });
   }
 });
 
 /**
  * Serve the newspaper PDF for in-browser viewing (iframe / PDF.js / object).
- * Supports Range requests so the large file can stream.
+ * Query: ?date=YYYY-MM-DD for a dated issue; omit date for the exam/today PDF.
+ * Supports Range requests so the file can stream.
  */
-app.get("/api/manual", requireAuth, (req, res) => {
-  if (!fs.existsSync(PDF_ABS)) {
-    return res.status(404).json({ error: "PDF not found", path: PDF_PATH });
+app.get("/api/manual", async (req, res) => {
+  try {
+    const issue = await resolveManualPdf(req.query.date);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${issue.filename}"`
+    );
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Accept-Ranges", "bytes");
+
+    res.sendFile(issue.path, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: err.message || "Failed to send PDF" });
+      }
+    });
+  } catch (err) {
+    const status = err?.status || 500;
+    res.status(status).json({
+      error: err?.message || "Failed to send PDF",
+      ...(status === 404 ? { path: EXAM_PDF_PATH } : {}),
+    });
   }
-
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader(
-    "Content-Disposition",
-    `inline; filename="${PDF_FILENAME}"`
-  );
-  res.setHeader("Cache-Control", "private, max-age=3600");
-  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-
-  res.sendFile(PDF_ABS, (err) => {
-    if (err && !res.headersSent) {
-      res.status(500).json({ error: err.message || "Failed to send PDF" });
-    }
-  });
 });
 
 /** Rolling session summary for follow-up rewrite in query decomposition. */
@@ -721,6 +784,8 @@ async function start() {
     logger.info("server", "GET /api/chats/:id");
     logger.info("server", "GET /api/discover (public) sections + Front Page articles");
     logger.info("server", "GET /api/discover/section/:section (public)");
+    logger.info("server", "GET /api/archive (public) dated issues");
+    logger.info("server", "GET /api/manual (public) ?date=YYYY-MM-DD");
     logger.info("server", "POST /api/query { question, mode, sessionId? }");
     logger.info("server", "POST /api/query/stream SSE + optional session save");
     logger.info("server", "GET /api/logs persisted Mongo logs");

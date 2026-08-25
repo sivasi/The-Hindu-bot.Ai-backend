@@ -13,7 +13,7 @@ import {
   TURBO_RETRIEVER_K,
 } from "../config.js";
 import { getDocumentsByFilter, openVectorStore } from "./chroma.js";
-import { parsePageFilter } from "./selfQuery.js";
+import { buildParsedQuery } from "./selfQuery.js";
 import { decomposeQuestion, dedupeDocuments } from "./queryDecomposition.js";
 import { generateHydePassage } from "./hyde.js";
 import { hybridRetrieve } from "./hybrid.js";
@@ -32,13 +32,13 @@ export const MODES = {
 const CHAT_AGENT_PREAMBLE = `You are a helpful chat agent for a newspaper archive Q&A assistant.
 The user message is already a standalone question (follow-ups were resolved before retrieval).
 Answer ONLY using the provided retrieved context below. Do not invent facts outside that context.
-Each chunk is labeled with its page number and section. If the user asked about a specific page or section, those chunks are already filtered — summarize the article text. Do not refuse just because the body does not repeat the page or section.
+Each chunk is labeled with its newspaper date, page number, and section. If the user asked about a specific date, page, or section, those chunks are already filtered — summarize the article text. Do not refuse just because the body does not repeat the date, page, or section.
 If the question has more than one topic, answer each topic from the retrieved context.
 If two topics are unrelated, say that clearly, then still summarise what the archive has on each topic. Do not omit a retrieved person or event just because they are not in the same article as the other topic.
 If the context is insufficient, say what is missing clearly.`;
 
 const DOCUMENT_PROMPT = PromptTemplate.fromTemplate(
-  "page {pageNumber} | section {section}\n{page_content}"
+  "date {date} | page {pageNumber} | section {section}\n{page_content}"
 );
 
 const NORMAL_SYSTEM_PROMPT = `${CHAT_AGENT_PREAMBLE}
@@ -130,9 +130,12 @@ export function parseStoredChunk(doc) {
   let chunkTotal = Number(meta.chunkTotal) || null;
   let bodyStart = 0;
 
-  if (lines[0]?.startsWith("heading - ")) {
-    heading = lines[0].slice("heading - ".length).trim() || heading;
+  if (lines[0]?.startsWith("date - ")) {
     bodyStart = 1;
+  }
+  if (lines[bodyStart]?.startsWith("heading - ")) {
+    heading = lines[bodyStart].slice("heading - ".length).trim() || heading;
+    bodyStart += 1;
   }
   if (lines[bodyStart]?.match(/^chunk\s+(\d+)\s*\/\s*(\d+)\s*$/i)) {
     const m = lines[bodyStart].match(/^chunk\s+(\d+)\s*\/\s*(\d+)\s*$/i);
@@ -149,6 +152,7 @@ export function parseStoredChunk(doc) {
     chunkIndex,
     chunkTotal,
     pageNumber: meta.pageNumber ?? null,
+    date: meta.date || null,
     section: meta.section || "",
     excerpt: excerptFromBody(body),
     pageContent,
@@ -234,10 +238,17 @@ function buildLlm({ temperature, maxOutputTokens, ...overrides } = {}) {
   });
 }
 
-async function retrieveForQuery(topic, llm, topK) {
+async function retrieveForQuery(topic, llm, topK, { original, llmFilters } = {}) {
   const search = typeof topic === "string" ? topic : topic.search;
-  const vague = Boolean(topic?.vague);
-  const parsed = parsePageFilter(search);
+  const parsed = buildParsedQuery({
+    original: original || search,
+    search,
+    llmFilters,
+  });
+  const hasFilter = Boolean(
+    parsed.filter || parsed.date || parsed.pageNumber || parsed.section
+  );
+  const vague = Boolean(topic?.vague) && !hasFilter;
   let retrieveMode = "similarity";
   let docs;
   let hydePassage = "";
@@ -384,7 +395,7 @@ export async function askQuestion({
     maxOutputTokens: 1024,
     thinkingBudget: 0,
   });
-  const { topics, standalone } = await decomposeQuestion(q, decomposer, {
+  const { topics, standalone, filters: llmFilters } = await decomposeQuestion(q, decomposer, {
     conversationSummary,
   });
   const agentInput = standalone || q;
@@ -400,7 +411,9 @@ export async function askQuestion({
     })),
   });
   const retrievals = await Promise.all(
-    topics.map((topic) => retrieveForQuery(topic, hydeLlm, topK))
+    topics.map((topic) =>
+      retrieveForQuery(topic, hydeLlm, topK, { original: q, llmFilters })
+    )
   );
   const retrieved = retrievals.flatMap((item) => item.docs);
   const retrievedDocs = dedupeDocuments(retrieved);

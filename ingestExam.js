@@ -16,7 +16,6 @@ import {
   deleteExamArticlesFromPage,
 } from "./services/examArticles.js";
 import {
-  PDF_PATH,
   EXAM_PDF_PATH,
   EXAM_PROGRESS_PATH,
   EXAM_CURATE_PAUSE_MS,
@@ -39,12 +38,6 @@ function logWarn(...args) {
 
 function resolvePdfPath() {
   if (fs.existsSync(EXAM_PDF_PATH)) return EXAM_PDF_PATH;
-  if (fs.existsSync(PDF_PATH)) {
-    console.warn(
-      `[exam-ingest] ${EXAM_PDF_PATH} not found; falling back to ${PDF_PATH}`
-    );
-    return PDF_PATH;
-  }
   throw new Error(
     `PDF not found. Place newspaper at ${EXAM_PDF_PATH} (or set EXAM_PDF_PATH).`
   );
