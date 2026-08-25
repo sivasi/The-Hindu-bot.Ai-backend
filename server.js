@@ -1,6 +1,4 @@
 import "dotenv/config";
-import fs from "fs";
-import path from "path";
 import express from "express";
 import cors from "cors";
 
@@ -10,6 +8,9 @@ import {
   EXAM_PDF_PATH,
   GOOGLE_CLIENT_ID,
   AUTH_REQUIRED,
+  TODAY_PDF_OBJECT,
+  apiManualPath,
+  gcsPdfPublicUrl,
 } from "./config.js";
 import {
   installConsoleCapture,
@@ -56,7 +57,6 @@ import { AppLog } from "./models/AppLog.js";
 installConsoleCapture();
 
 const app = express();
-const EXAM_PDF_ABS = path.resolve(EXAM_PDF_PATH);
 
 async function resolveManualPdf(dateQuery) {
   const date = String(dateQuery || "").trim();
@@ -67,7 +67,7 @@ async function resolveManualPdf(dateQuery) {
       throw err;
     }
     const issue = await resolveIssuePdf(date);
-    if (!issue) {
+    if (!issue?.remoteUrl) {
       const err = new Error(`No newspaper PDF for ${date}`);
       err.status = 404;
       throw err;
@@ -75,17 +75,18 @@ async function resolveManualPdf(dateQuery) {
     return issue;
   }
 
-  if (fs.existsSync(EXAM_PDF_ABS)) {
-    return {
-      path: EXAM_PDF_ABS,
-      date: null,
-      totalPages: null,
-      filename: path.basename(EXAM_PDF_ABS),
-    };
+  const remoteUrl = gcsPdfPublicUrl(TODAY_PDF_OBJECT);
+  if (!remoteUrl) {
+    const err = new Error("PDF not found");
+    err.status = 404;
+    throw err;
   }
-  const err = new Error("PDF not found");
-  err.status = 404;
-  throw err;
+  return {
+    date: null,
+    filename: TODAY_PDF_OBJECT,
+    url: apiManualPath(null),
+    remoteUrl,
+  };
 }
 
 app.use(
@@ -436,20 +437,19 @@ app.get("/api/archive", async (_req, res) => {
   }
 });
 
-/** JSON metadata for the archived PDF (public). */
+/** JSON metadata for the archived PDF (public). Returns a URL only. */
 app.get("/api/manual/info", async (req, res) => {
   try {
     const issue = await resolveManualPdf(req.query.date);
-    const stat = fs.statSync(issue.path);
     const progress = await readProgress();
     const totalPages = issue.date
       ? progress?.files?.[issue.date]?.totalPages ?? issue.totalPages
       : progress?.totalPages ?? issue.totalPages;
     res.json({
-      url: issue.date ? `/api/manual?date=${issue.date}` : "/api/manual",
+      url: issue.url || apiManualPath(issue.date),
       filename: issue.filename,
       date: issue.date,
-      sizeBytes: stat.size,
+      sizeBytes: issue.sizeBytes ?? null,
       totalPages: totalPages ?? null,
       source: issue.filename,
     });
@@ -463,27 +463,18 @@ app.get("/api/manual/info", async (req, res) => {
 });
 
 /**
- * Serve the newspaper PDF for in-browser viewing (iframe / PDF.js / object).
- * Query: ?date=YYYY-MM-DD for a dated issue; omit date for the exam/today PDF.
- * Supports Range requests so the file can stream.
+ * Public PDF URL: 302 to the GCS object (no disk).
+ * Query: ?date=YYYY-MM-DD for a dated issue; omit date for today's PDF.
  */
 app.get("/api/manual", async (req, res) => {
   try {
     const issue = await resolveManualPdf(req.query.date);
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="${issue.filename}"`
-    );
-    res.setHeader("Cache-Control", "private, max-age=3600");
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    res.setHeader("Accept-Ranges", "bytes");
-
-    res.sendFile(issue.path, (err) => {
-      if (err && !res.headersSent) {
-        res.status(500).json({ error: err.message || "Failed to send PDF" });
-      }
-    });
+    if (!issue.remoteUrl) {
+      const err = new Error("PDF not found");
+      err.status = 404;
+      throw err;
+    }
+    return res.redirect(302, issue.remoteUrl);
   } catch (err) {
     const status = err?.status || 500;
     res.status(status).json({

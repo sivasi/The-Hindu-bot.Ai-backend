@@ -57,12 +57,12 @@ metadata:
   labels:
     app: rag-api
 spec:
-  type: NodePort
+  type: LoadBalancer
+  loadBalancerIP: 34.93.146.63
   selector:
     app: rag-api
   ports:
     - name: http
-      port: 3001
+      port: 80
       targetPort: http
-      nodePort: 30001
       protocol: TCP

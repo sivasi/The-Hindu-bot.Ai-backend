@@ -23,6 +23,35 @@ export const CHROMA_COLLECTION =
   process.env.CHROMA_COLLECTION || "newspapers_2026";
 export const EXAM_PDF_PATH =
   process.env.EXAM_PDF_PATH || path.join("data", "THE HINDU today.pdf");
+/** Public GCS bucket for newspaper PDFs (local and GKE). */
+export const GCS_PDF_BUCKET =
+  process.env.GCS_PDF_BUCKET || "hindu-bot-pdfs-b23f08c8";
+
+export function hinduPdfFilename(iso) {
+  const [year, month, day] = String(iso).split("-");
+  return `The-Hindu-${day}-${month}-${year}.pdf`;
+}
+
+/** Basename that works for Windows paths even when the API runs on Linux. */
+export function pdfBasename(source) {
+  const name = String(source || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop();
+  return name || "";
+}
+
+export function apiManualPath(date) {
+  return date ? `/api/manual?date=${date}` : "/api/manual";
+}
+
+export function gcsPdfPublicUrl(objectName) {
+  if (!GCS_PDF_BUCKET || !objectName) return null;
+  return `https://storage.googleapis.com/${GCS_PDF_BUCKET}/${encodeURIComponent(objectName)}`;
+}
+
+export const TODAY_PDF_OBJECT =
+  pdfBasename(EXAM_PDF_PATH) || "THE HINDU today.pdf";
 export const EXAM_PROGRESS_PATH = path.join("cache", "exam-ingest.progress.json");
 /** Pause between page curate calls (0 = max speed). */
 export const EXAM_CURATE_PAUSE_MS = Number(process.env.EXAM_CURATE_PAUSE_MS) || 0;

@@ -9,6 +9,10 @@ import {
   EMBEDDING_MODEL,
   CHROMA_URL,
   CHROMA_COLLECTION,
+  apiManualPath,
+  gcsPdfPublicUrl,
+  hinduPdfFilename,
+  pdfBasename,
 } from "../config.js";
 
 export const PROGRESS_VERSION = 2;
@@ -371,7 +375,8 @@ export function progressSummary(progress) {
 }
 
 /**
- * Dated issues that still have a PDF on disk (newest first).
+ * Dated issues that were ingested (newest first).
+ * `url` is the backend API path; /api/manual 302s to GCS.
  */
 export async function listPresentIssues() {
   const progress = await loadProgress();
@@ -380,17 +385,15 @@ export async function listPresentIssues() {
 
   for (const date of Object.keys(files).sort().reverse()) {
     const entry = files[date];
-    if (!entry?.source || entry.status === "missing") continue;
-    try {
-      await fs.access(entry.source);
-      issues.push({
-        date,
-        filename: path.basename(entry.source),
-        totalPages: entry.totalPages ?? null,
-      });
-    } catch {
-      // File is gone; skip.
-    }
+    if (entry?.status === "missing") continue;
+    const filename = pdfBasename(entry?.source) || hinduPdfFilename(date);
+    if (!filename) continue;
+    issues.push({
+      date,
+      filename,
+      totalPages: entry?.totalPages ?? null,
+      url: apiManualPath(date),
+    });
   }
 
   return {
@@ -400,43 +403,28 @@ export async function listPresentIssues() {
   };
 }
 
-/**
- * Resolve a dated newspaper PDF on disk (calendar progress, then PDF_DIR scan).
- */
+function issueMeta(date, filename, extra = {}) {
+  return {
+    date,
+    filename,
+    totalPages: extra.totalPages ?? null,
+    sizeBytes: extra.sizeBytes ?? null,
+    url: apiManualPath(date),
+    remoteUrl: gcsPdfPublicUrl(filename),
+  };
+}
+
+/** Resolve a dated newspaper PDF to its public GCS object (no disk I/O). */
 export async function resolveIssuePdf(date) {
   if (!isISODate(date)) return null;
 
   const progress = await loadProgress();
   const entry = progress?.files?.[date];
-  if (entry?.source) {
-    try {
-      await fs.access(entry.source);
-      return {
-        path: entry.source,
-        date,
-        totalPages: entry.totalPages ?? null,
-        filename: path.basename(entry.source),
-      };
-    } catch {
-      // File moved; try a fresh folder scan.
-    }
-  }
-
-  try {
-    const { byDate } = await discoverIssues();
-    const found = byDate.get(date);
-    if (found?.source) {
-      await fs.access(found.source);
-      return {
-        path: found.source,
-        date,
-        totalPages: entry?.totalPages ?? null,
-        filename: path.basename(found.source),
-      };
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
+  if (entry?.status === "missing") return null;
+  const filename = pdfBasename(entry?.source) || hinduPdfFilename(date);
+  if (!filename || !gcsPdfPublicUrl(filename)) return null;
+  return issueMeta(date, filename, {
+    totalPages: entry?.totalPages ?? null,
+    sizeBytes: entry?.sourceSize ?? null,
+  });
 }

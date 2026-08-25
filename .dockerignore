@@ -15,3 +15,4 @@ client_secret*.json
 .dockerignore
 Dockerfile
 docker-compose.yml
+data/manual4.pdf
