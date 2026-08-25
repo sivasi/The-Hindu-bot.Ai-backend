@@ -14,6 +14,7 @@ import {
   hinduPdfFilename,
   pdfBasename,
 } from "../config.js";
+import { listNewspaperPdfs } from "./gcsPdfs.js";
 
 export const PROGRESS_VERSION = 2;
 
@@ -375,26 +376,44 @@ export function progressSummary(progress) {
 }
 
 /**
- * Dated issues that were ingested (newest first).
- * `url` is the backend API path; /api/manual 302s to GCS.
+ * Dated issues from GCS (any year), merged with ingest progress for page counts.
  */
 export async function listPresentIssues() {
   const progress = await loadProgress();
   const files = progress?.files || {};
-  const issues = [];
+  const byDate = new Map();
 
-  for (const date of Object.keys(files).sort().reverse()) {
+  for (const date of Object.keys(files)) {
     const entry = files[date];
     if (entry?.status === "missing") continue;
     const filename = pdfBasename(entry?.source) || hinduPdfFilename(date);
     if (!filename) continue;
-    issues.push({
+    byDate.set(date, {
       date,
       filename,
       totalPages: entry?.totalPages ?? null,
       url: apiManualPath(date),
     });
   }
+
+  try {
+    const gcsIssues = await listNewspaperPdfs();
+    for (const issue of gcsIssues) {
+      const current = byDate.get(issue.date);
+      byDate.set(issue.date, {
+        date: issue.date,
+        filename: issue.filename,
+        totalPages: current?.totalPages ?? null,
+        url: apiManualPath(issue.date),
+      });
+    }
+  } catch (err) {
+    console.warn(`[archive] GCS listing failed: ${err?.message || err}`);
+  }
+
+  const issues = [...byDate.values()].sort((a, b) =>
+    a.date < b.date ? 1 : a.date > b.date ? -1 : 0
+  );
 
   return {
     calendarStart: progress?.calendarStart || CALENDAR_START,

@@ -52,6 +52,18 @@ export function gcsPdfPublicUrl(objectName) {
 
 export const TODAY_PDF_OBJECT =
   pdfBasename(EXAM_PDF_PATH) || "THE HINDU today.pdf";
+/** Comma-separated Google emails allowed to upload newspaper PDFs. */
+export const PUBLISHER_EMAILS = String(
+  process.env.PUBLISHER_EMAILS || "adityasivasi@gmail.com"
+)
+  .split(",")
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
+
+export function isPublisherEmail(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  return Boolean(normalized && PUBLISHER_EMAILS.includes(normalized));
+}
 export const EXAM_PROGRESS_PATH = path.join("cache", "exam-ingest.progress.json");
 /** Pause between page curate calls (0 = max speed). */
 export const EXAM_CURATE_PAUSE_MS = Number(process.env.EXAM_CURATE_PAUSE_MS) || 0;

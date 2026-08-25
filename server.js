@@ -53,6 +53,7 @@ import {
 } from "./services/examArticles.js";
 import { EXAM_SECTIONS } from "./models/ExamArticle.js";
 import { AppLog } from "./models/AppLog.js";
+import publisherRouter from "./routes/publisher.js";
 
 installConsoleCapture();
 
@@ -163,6 +164,10 @@ app.get("/", (_req, res) => {
       "GET  /api/manual",
       "GET  /api/manual/info",
       "GET  /api/archive",
+      "GET  /api/publisher/access",
+      "POST /api/publisher/pdf",
+      "POST /api/publisher/pdf/sign",
+      "POST /api/publisher/pdf/complete",
       "GET  /api/discover",
       "GET  /api/discover/section/:section",
       "GET  /api/exam/sections",
@@ -436,6 +441,8 @@ app.get("/api/archive", async (_req, res) => {
     });
   }
 });
+
+app.use("/api/publisher", publisherRouter);
 
 /** JSON metadata for the archived PDF (public). Returns a URL only. */
 app.get("/api/manual/info", async (req, res) => {
@@ -776,6 +783,7 @@ async function start() {
     logger.info("server", "GET /api/discover (public) sections + Front Page articles");
     logger.info("server", "GET /api/discover/section/:section (public)");
     logger.info("server", "GET /api/archive (public) dated issues");
+    logger.info("server", "POST /api/publisher/pdf publisher-only GCS upload");
     logger.info("server", "GET /api/manual (public) ?date=YYYY-MM-DD");
     logger.info("server", "POST /api/query { question, mode, sessionId? }");
     logger.info("server", "POST /api/query/stream SSE + optional session save");

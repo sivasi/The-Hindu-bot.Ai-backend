@@ -11,6 +11,7 @@ COPY config.js server.js chunkText.js layoutArticles.js ingest.js ingest-lexical
 COPY services ./services
 COPY middleware ./middleware
 COPY models ./models
+COPY routes ./routes
 COPY data ./data
 COPY cache ./cache
 

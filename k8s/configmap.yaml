@@ -17,3 +17,4 @@ data:
   CHAT_MODEL: "gemini-2.5-flash"
   CHAT_LOCATION: "asia-south1"
   GCS_PDF_BUCKET: "hindu-bot-pdfs-b23f08c8"
+  PUBLISHER_EMAILS: "adityasivasi@gmail.com"
